@@ -43,6 +43,8 @@
 #define MAC_TEXT_LENGTH 18
 #define HTTP_STACK_SIZE 8192
 #define HTTP_MAX_URI_HANDLERS 16
+// The lwIP socket pool is shared with the HTTP listener and control socket, NTP, Munin and the SNTP client.
+#define HTTP_MAX_OPEN_SOCKETS 8
 #define HTTP_STATUS_CONFLICT "409 Conflict"
 #define FORM_BUFFER_SIZE 768
 #define PARAM_SIZE 200
@@ -610,6 +612,8 @@ esp_err_t web_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = HTTP_STACK_SIZE;
     config.max_uri_handlers = HTTP_MAX_URI_HANDLERS;
+    config.max_open_sockets = HTTP_MAX_OPEN_SOCKETS;
+    config.lru_purge_enable = true;
 
     httpd_handle_t server;
     ESP_RETURN_ON_ERROR(httpd_start(&server, &config), TAG, "httpd start");
