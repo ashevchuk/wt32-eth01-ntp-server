@@ -1,6 +1,8 @@
 #include <stdbool.h>
 
 #include "esp_check.h"
+#include "esp_event.h"
+#include "esp_netif.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -54,6 +56,12 @@ static void on_gnss_second(const struct tm *utc, int64_t edge_us)
 
 // A component that fails to start must not take the rest down: the device would reboot in a loop, never reach the
 // OTA confirmation and have the bootloader roll back a good image.
+static esp_err_t network_stack_init(void)
+{
+    ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif init");
+    return esp_event_loop_create_default();
+}
+
 static bool started(const char *component, esp_err_t err)
 {
     if (err != ESP_OK) {
@@ -72,8 +80,11 @@ void app_main(void)
     // The defaults stay in place when the stored settings cannot be read.
     network_settings_t network;
     started("network settings", settings_load_network(&network));
-    started("ethernet", eth_start(&network));
+    // lwIP sends a packet that has no source address (DNS, the SNTP client) through the first interface whose subnet
+    // matches, and the newest interface is listed first. Ethernet is the primary one, so it is started after Wi-Fi.
+    started("network stack", network_stack_init());
     started("wifi", wifi_start(&network));
+    started("ethernet", eth_start(&network));
 
     i2c_master_bus_handle_t i2c_bus;
     if (started("i2c bus", i2c_bus_init(&i2c_bus))) {

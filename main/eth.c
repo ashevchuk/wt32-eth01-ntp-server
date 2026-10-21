@@ -202,8 +202,6 @@ static void retry_task(void *arg)
 esp_err_t eth_start(const network_settings_t *network)
 {
     settings = *network;
-    ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif init");
-    ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop");
     ESP_RETURN_ON_ERROR(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, on_eth_event, NULL), TAG, "eth handler");
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, on_got_ip, NULL), TAG, "ip handler");
 
