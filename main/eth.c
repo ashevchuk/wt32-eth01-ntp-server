@@ -11,6 +11,8 @@
 #include "freertos/task.h"
 #include "soc/emac_dma_struct.h"
 
+#include "static_ip.h"
+
 #define ETH_OSC_ENABLE_GPIO GPIO_NUM_16
 #define ETH_PHY_ADDR 1
 #define ETH_OSC_STARTUP_MS 10
@@ -55,29 +57,6 @@ static esp_err_t enable_phy_oscillator(void)
     ESP_RETURN_ON_ERROR(gpio_config(&cfg), TAG, "oscillator gpio config");
     ESP_RETURN_ON_ERROR(gpio_set_level(ETH_OSC_ENABLE_GPIO, 1), TAG, "oscillator enable");
     vTaskDelay(pdMS_TO_TICKS(ETH_OSC_STARTUP_MS));
-    return ESP_OK;
-}
-
-static esp_err_t apply_static_address(esp_netif_t *netif, const network_settings_t *network)
-{
-    const esp_err_t stop_err = esp_netif_dhcpc_stop(netif);
-    if (stop_err != ESP_OK && stop_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
-        return stop_err;
-    }
-    esp_netif_ip_info_t info = {0};
-    ESP_RETURN_ON_ERROR(esp_netif_str_to_ip4(network->eth_ip, &info.ip), TAG, "ip");
-    ESP_RETURN_ON_ERROR(esp_netif_str_to_ip4(network->eth_mask, &info.netmask), TAG, "netmask");
-    if (network->eth_gateway[0]) {
-        ESP_RETURN_ON_ERROR(esp_netif_str_to_ip4(network->eth_gateway, &info.gw), TAG, "gateway");
-    }
-    ESP_RETURN_ON_ERROR(esp_netif_set_ip_info(netif, &info), TAG, "set ip info");
-
-    if (network->eth_dns[0]) {
-        esp_netif_dns_info_t dns = {0};
-        dns.ip.type = ESP_IPADDR_TYPE_V4;
-        ESP_RETURN_ON_ERROR(esp_netif_str_to_ip4(network->eth_dns, &dns.ip.u_addr.ip4), TAG, "dns");
-        ESP_RETURN_ON_ERROR(esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns), TAG, "set dns");
-    }
     return ESP_OK;
 }
 
@@ -140,7 +119,8 @@ esp_err_t eth_start(const network_settings_t *network)
     ESP_RETURN_ON_FALSE(netif, ESP_ERR_NO_MEM, TAG, "netif alloc");
     ESP_RETURN_ON_ERROR(esp_netif_set_hostname(netif, network->hostname), TAG, "hostname");
     if (network->eth_static) {
-        ESP_RETURN_ON_ERROR(apply_static_address(netif, network), TAG, "static address");
+        ESP_RETURN_ON_ERROR(static_ip_apply(netif, network->eth_ip, network->eth_mask, network->eth_gateway, network->eth_dns),
+                            TAG, "static address");
     }
 
     eth_mac_config_t mac_cfg = ETH_MAC_DEFAULT_CONFIG();

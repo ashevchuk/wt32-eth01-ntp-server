@@ -8,6 +8,8 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 
+#include "static_ip.h"
+
 // Ethernet is the primary interface; the default route priority of Wi-Fi (100) would otherwise win over it (50).
 #define WIFI_ROUTE_PRIORITY 10
 
@@ -41,6 +43,11 @@ esp_err_t wifi_start(const network_settings_t *network)
     ESP_RETURN_ON_FALSE(sta_netif, ESP_ERR_NO_MEM, TAG, "netif");
     esp_netif_set_route_prio(sta_netif, WIFI_ROUTE_PRIORITY);
     ESP_RETURN_ON_ERROR(esp_netif_set_hostname(sta_netif, network->hostname), TAG, "hostname");
+    if (network->wifi_static) {
+        ESP_RETURN_ON_ERROR(static_ip_apply(sta_netif, network->wifi_ip, network->wifi_mask, network->wifi_gateway,
+                                            network->wifi_dns),
+                            TAG, "static address");
+    }
 
     const wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&init_config), TAG, "init");

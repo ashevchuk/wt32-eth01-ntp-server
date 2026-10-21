@@ -143,6 +143,12 @@ progress { width: 100%; }
         <select id="wifi-enabled"><option value="0">Disabled</option><option value="1">Enabled (client)</option></select>
         <input id="wifi-ssid" placeholder="SSID" maxlength="32" autocomplete="off">
         <input id="wifi-password" type="password" placeholder="Password (empty keeps the stored one)" maxlength="63" autocomplete="new-password">
+        <label for="wifi-mode">Wi-Fi address</label>
+        <select id="wifi-mode"><option value="dhcp">DHCP</option><option value="static">Static</option></select>
+        <input id="wifi-ip" placeholder="IP address" autocomplete="off">
+        <input id="wifi-mask" placeholder="Netmask" autocomplete="off">
+        <input id="wifi-gw" placeholder="Gateway (optional)" autocomplete="off">
+        <input id="wifi-dns" placeholder="DNS (optional)" autocomplete="off">
         <button type="submit">Save network settings</button>
         <button type="button" class="secondary" id="reboot">Restart device</button>
         <div class="result" id="net-result">Changes apply after a restart.</div>
@@ -177,7 +183,7 @@ progress { width: 100%; }
         <input id="plugin-name" maxlength="31" spellcheck="false" autocomplete="off">
         <button type="submit">Save plugin name</button>
       </form>
-      <div class="result" id="sensor-result">The name is the Munin field name: letters, digits, underscore. Leave empty to restore the default.</div>
+      <div class="result" id="sensor-result">The name is the Munin field name: letters, digits, underscore. Leave empty to keep the sensor out of Munin.</div>
     </section>
     <section class="card">
       <h2>Firmware update</h2>
@@ -355,7 +361,9 @@ function syncNetworkFields() {
   const isStatic = $("net-mode").value === "static";
   for (const id of ["net-ip", "net-mask", "net-gw", "net-dns"]) $(id).disabled = !isStatic;
   const wifiOn = $("wifi-enabled").value === "1";
-  for (const id of ["wifi-ssid", "wifi-password"]) $(id).disabled = !wifiOn;
+  for (const id of ["wifi-ssid", "wifi-password", "wifi-mode"]) $(id).disabled = !wifiOn;
+  const wifiStatic = wifiOn && $("wifi-mode").value === "static";
+  for (const id of ["wifi-ip", "wifi-mask", "wifi-gw", "wifi-dns"]) $(id).disabled = !wifiStatic;
 }
 
 async function loadNetwork() {
@@ -368,11 +376,17 @@ async function loadNetwork() {
   $("net-dns").value = n.eth_dns;
   $("wifi-enabled").value = n.wifi_enabled ? "1" : "0";
   $("wifi-ssid").value = n.wifi_ssid;
+  $("wifi-mode").value = n.wifi_static ? "static" : "dhcp";
+  $("wifi-ip").value = n.wifi_ip;
+  $("wifi-mask").value = n.wifi_mask;
+  $("wifi-gw").value = n.wifi_gateway;
+  $("wifi-dns").value = n.wifi_dns;
   syncNetworkFields();
 }
 
 $("net-mode").addEventListener("change", syncNetworkFields);
 $("wifi-enabled").addEventListener("change", syncNetworkFields);
+$("wifi-mode").addEventListener("change", syncNetworkFields);
 $("net-form").addEventListener("submit", e => {
   e.preventDefault();
   post("/api/network", {
@@ -385,6 +399,11 @@ $("net-form").addEventListener("submit", e => {
     wifi_enabled: $("wifi-enabled").value,
     wifi_ssid: $("wifi-ssid").value,
     wifi_password: $("wifi-password").value,
+    wifi_mode: $("wifi-mode").value,
+    wifi_ip: $("wifi-ip").value.trim(),
+    wifi_mask: $("wifi-mask").value.trim(),
+    wifi_gateway: $("wifi-gw").value.trim(),
+    wifi_dns: $("wifi-dns").value.trim(),
   }, "net-result");
 });
 $("reboot").addEventListener("click", async () => {
@@ -477,6 +496,7 @@ function buildSensorRow(sensor) {
   row.className = "sensor";
   const input = document.createElement("input");
   input.value = sensor.name;
+  input.placeholder = "Not exported to Munin";
   input.maxLength = 31;
   input.spellcheck = false;
   input.autocomplete = "off";

@@ -381,9 +381,12 @@ static esp_err_t network_get_handler(httpd_req_t *req)
     }
     out.length = 0;
     json_printf(&out, "{\"eth_static\":%s,\"eth_ip\":\"%s\",\"eth_mask\":\"%s\",\"eth_gateway\":\"%s\","
-                      "\"eth_dns\":\"%s\",\"wifi_enabled\":%s,\"wifi_password_set\":%s,\"wifi_ssid\":",
+                      "\"eth_dns\":\"%s\",\"wifi_enabled\":%s,\"wifi_password_set\":%s,\"wifi_static\":%s,"
+                      "\"wifi_ip\":\"%s\",\"wifi_mask\":\"%s\",\"wifi_gateway\":\"%s\",\"wifi_dns\":\"%s\",\"wifi_ssid\":",
                 network.eth_static ? "true" : "false", network.eth_ip, network.eth_mask, network.eth_gateway,
-                network.eth_dns, network.wifi_enabled ? "true" : "false", network.wifi_password[0] ? "true" : "false");
+                network.eth_dns, network.wifi_enabled ? "true" : "false", network.wifi_password[0] ? "true" : "false",
+                network.wifi_static ? "true" : "false", network.wifi_ip, network.wifi_mask, network.wifi_gateway,
+                network.wifi_dns);
     json_string(&out, network.wifi_ssid);
     json_printf(&out, ",\"hostname\":\"%s\"}", network.hostname);
 
@@ -422,6 +425,10 @@ static esp_err_t network_post_handler(httpd_req_t *req)
                 && assign_field(form, "eth_mask", network.eth_mask, sizeof(network.eth_mask))
                 && assign_field(form, "eth_gateway", network.eth_gateway, sizeof(network.eth_gateway))
                 && assign_field(form, "eth_dns", network.eth_dns, sizeof(network.eth_dns))
+                && assign_field(form, "wifi_ip", network.wifi_ip, sizeof(network.wifi_ip))
+                && assign_field(form, "wifi_mask", network.wifi_mask, sizeof(network.wifi_mask))
+                && assign_field(form, "wifi_gateway", network.wifi_gateway, sizeof(network.wifi_gateway))
+                && assign_field(form, "wifi_dns", network.wifi_dns, sizeof(network.wifi_dns))
                 && assign_field(form, "wifi_ssid", network.wifi_ssid, sizeof(network.wifi_ssid))
                 && assign_field(form, "wifi_password", network.wifi_password, sizeof(network.wifi_password))
                 && assign_field(form, "hostname", network.hostname, sizeof(network.hostname));
@@ -430,6 +437,9 @@ static esp_err_t network_post_handler(httpd_req_t *req)
     }
     if (form_value(form, "eth_mode", value)) {
         network.eth_static = strcmp(value, "static") == 0;
+    }
+    if (form_value(form, "wifi_mode", value)) {
+        network.wifi_static = strcmp(value, "static") == 0;
     }
     if (form_value(form, "wifi_enabled", value)) {
         network.wifi_enabled = strcmp(value, "1") == 0;

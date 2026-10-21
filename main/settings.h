@@ -30,6 +30,11 @@ typedef struct {
     bool wifi_enabled;
     char wifi_ssid[SETTINGS_SSID_MAX_LENGTH];
     char wifi_password[SETTINGS_WIFI_PASSWORD_MAX_LENGTH];
+    bool wifi_static;
+    char wifi_ip[SETTINGS_IP_LENGTH];
+    char wifi_mask[SETTINGS_IP_LENGTH];
+    char wifi_gateway[SETTINGS_IP_LENGTH];
+    char wifi_dns[SETTINGS_IP_LENGTH];
     char hostname[SETTINGS_HOSTNAME_MAX_LENGTH];
 } network_settings_t;
 

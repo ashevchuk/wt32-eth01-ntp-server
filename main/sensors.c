@@ -47,12 +47,10 @@
 #define POWER_ON_TEMPERATURE_RAW 0x0550
 #define POWER_ON_COUNT_REMAIN 0x0C
 #define DEGREES_PER_LSB 0.0625f
-#define DEFAULT_NAME_SERIAL_BYTES 6
 
 struct sensor {
     uint8_t rom[SETTINGS_ROM_LENGTH];
     char name[SETTINGS_SENSOR_NAME_MAX_LENGTH];
-    bool custom_name;
     bool present;
     bool has_reading;
     float temperature_c;
@@ -202,14 +200,6 @@ static void rom_to_id(const uint8_t rom[SETTINGS_ROM_LENGTH], char id[SENSOR_ID_
     }
 }
 
-static void default_name(const uint8_t rom[SETTINGS_ROM_LENGTH], char name[SETTINGS_SENSOR_NAME_MAX_LENGTH])
-{
-    int length = snprintf(name, SETTINGS_SENSOR_NAME_MAX_LENGTH, "ds18b20_");
-    for (int i = 1; i <= DEFAULT_NAME_SERIAL_BYTES; i++) {
-        length += snprintf(name + length, SETTINGS_SENSOR_NAME_MAX_LENGTH - length, "%02x", rom[i]);
-    }
-}
-
 bool sensors_name_valid(const char *name)
 {
     const size_t length = strlen(name);
@@ -257,9 +247,6 @@ static void register_found(const uint8_t rom[SETTINGS_ROM_LENGTH])
         const char *stored = stored_name_for(rom);
         if (stored) {
             snprintf(entry->name, sizeof(entry->name), "%s", stored);
-            entry->custom_name = true;
-        } else {
-            default_name(rom, entry->name);
         }
     }
     portEXIT_CRITICAL(&table_lock);
@@ -374,8 +361,8 @@ size_t sensors_snapshot(sensor_info_t out[SENSORS_MAX])
 
 esp_err_t sensors_rename(const char *id, const char *name)
 {
-    const bool reset_to_default = name[0] == '\0';
-    if (!reset_to_default && !sensors_name_valid(name)) {
+    const bool unnamed = name[0] == '\0';
+    if (!unnamed && !sensors_name_valid(name)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -391,27 +378,20 @@ esp_err_t sensors_rename(const char *id, const char *name)
     }
     if (target) {
         result = ESP_OK;
-        char new_name[SETTINGS_SENSOR_NAME_MAX_LENGTH];
-        if (reset_to_default) {
-            default_name(target->rom, new_name);
-        } else {
-            snprintf(new_name, sizeof(new_name), "%s", name);
-        }
         for (size_t i = 0; i < table_size; i++) {
-            if (&table[i] != target && strcmp(table[i].name, new_name) == 0) {
+            if (!unnamed && &table[i] != target && strcmp(table[i].name, name) == 0) {
                 result = ESP_ERR_INVALID_STATE;
             }
         }
         if (result == ESP_OK) {
-            snprintf(target->name, sizeof(target->name), "%s", new_name);
-            target->custom_name = !reset_to_default;
+            snprintf(target->name, sizeof(target->name), "%s", name);
         }
     }
     sensor_name_t to_store[SENSORS_MAX] = {0};
     if (result == ESP_OK) {
         size_t used = 0;
         for (size_t i = 0; i < table_size; i++) {
-            if (table[i].custom_name) {
+            if (table[i].name[0]) {
                 memcpy(to_store[used].rom, table[i].rom, SETTINGS_ROM_LENGTH);
                 snprintf(to_store[used].name, sizeof(to_store[used].name), "%s", table[i].name);
                 used++;

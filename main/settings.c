@@ -182,20 +182,20 @@ static bool hostname_valid(const char *name)
     return true;
 }
 
-static const char *static_address_error(const network_settings_t *network)
+static const char *static_address_error(const char *ip_text, const char *mask_text, const char *gateway_text,
+                                        const char *dns_text)
 {
     uint32_t ip, mask, gateway, dns;
-    if (!parse_ip(network->eth_ip, &ip) || ip == 0) {
+    if (!parse_ip(ip_text, &ip) || ip == 0) {
         return "invalid IP address";
     }
-    if (!parse_ip(network->eth_mask, &mask) || !is_netmask(mask)) {
+    if (!parse_ip(mask_text, &mask) || !is_netmask(mask)) {
         return "invalid netmask";
     }
-    if (network->eth_gateway[0]
-        && (!parse_ip(network->eth_gateway, &gateway) || (gateway & mask) != (ip & mask))) {
+    if (gateway_text[0] && (!parse_ip(gateway_text, &gateway) || (gateway & mask) != (ip & mask))) {
         return "gateway is invalid or outside the subnet";
     }
-    if (network->eth_dns[0] && !parse_ip(network->eth_dns, &dns)) {
+    if (dns_text[0] && !parse_ip(dns_text, &dns)) {
         return "invalid DNS address";
     }
     return NULL;
@@ -207,7 +207,8 @@ const char *settings_network_error(const network_settings_t *network)
         return "invalid hostname";
     }
     if (network->eth_static) {
-        const char *error = static_address_error(network);
+        const char *error = static_address_error(network->eth_ip, network->eth_mask, network->eth_gateway,
+                                                 network->eth_dns);
         if (error) {
             return error;
         }
@@ -222,6 +223,13 @@ const char *settings_network_error(const network_settings_t *network)
                                      || password_length > WPA_PASSPHRASE_MAX_LENGTH
                                      || !printable_ascii(network->wifi_password))) {
             return "Wi-Fi password must be empty or 8-63 printable ASCII characters";
+        }
+        if (network->wifi_static) {
+            const char *error = static_address_error(network->wifi_ip, network->wifi_mask, network->wifi_gateway,
+                                                     network->wifi_dns);
+            if (error) {
+                return error;
+            }
         }
     }
     return NULL;

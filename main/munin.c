@@ -80,6 +80,9 @@ static void reply_config(int client)
                           "graph_category sensors\n"
                           "graph_args --base 1000\n");
     for (size_t i = 0; i < count && length < (int)sizeof(reply); i++) {
+        if (!sensors[i].name[0]) {
+            continue;
+        }
         length += snprintf(reply + length, sizeof(reply) - length, "%s.label %s\n%s.info DS18B20 %s\n",
                            sensors[i].name, sensors[i].name, sensors[i].name, sensors[i].id);
     }
@@ -94,6 +97,9 @@ static void reply_fetch(int client)
     char reply[REPLY_SIZE];
     int length = 0;
     for (size_t i = 0; i < count && length < (int)sizeof(reply); i++) {
+        if (!sensors[i].name[0]) {
+            continue;
+        }
         if (sensors[i].has_reading) {
             length += snprintf(reply + length, sizeof(reply) - length, "%s.value %.2f\n", sensors[i].name,
                                sensors[i].temperature_c);
