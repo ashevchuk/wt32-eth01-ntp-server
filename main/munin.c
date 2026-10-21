@@ -147,6 +147,17 @@ static int fetch_agc(char *out, size_t size)
     return snprintf(out, size, "agc.value %.1f\n", hardware.agc_percent);
 }
 
+static int fetch_jamming_state(char *out, size_t size)
+{
+    gnss_hardware_t hardware;
+    gnss_get_hardware(&hardware);
+    // 0 means the monitor has no verdict yet, so it is not a reading.
+    if (!hardware.known || hardware.jamming_state == 0) {
+        return snprintf(out, size, "state.value " NO_VALUE "\n");
+    }
+    return snprintf(out, size, "state.value %u\n", hardware.jamming_state);
+}
+
 static const struct builtin_plugin builtin_plugins[] = {
     {"gnss_satellites",
      "graph_title GNSS satellites\n"
@@ -206,6 +217,16 @@ static const struct builtin_plugin builtin_plugins[] = {
      "jamming.label Continuous-wave interference\n"
      "jamming.info 0 means none, 255 strong\n",
      fetch_interference},
+    {"gnss_jamming_state",
+     "graph_title GNSS interference state\n"
+     "graph_vlabel 1 ok, 2 warning, 3 critical\n"
+     "graph_category gnss\n"
+     "graph_args --base 1000 --lower-limit 0 --upper-limit 3\n"
+     "state.label Verdict of the interference monitor\n"
+     "state.info Warning: interference is visible but the fix holds; critical: interference and no fix\n"
+     "state.warning :1\n"
+     "state.critical :2\n",
+     fetch_jamming_state},
     {"gnss_agc",
      "graph_title GNSS receiver AGC\n"
      "graph_vlabel percent\n"

@@ -49,7 +49,7 @@ IO35       <---  PPS
 GND        ----  GND
 ```
 
-TX and RX are crossed. The firmware expects NMEA sentences at 115200 baud. Place the antenna with a clear view of the sky; with a poor view the fix flickers and the server falls back to the RTC.
+TX and RX are crossed. The firmware expects NMEA sentences at 115200 baud and tells the receiver that the antenna is active (`ITFM_ANTENNA_ACTIVE` in `main/gnss_config.c`), which the interference monitor needs to judge the signal level; change it for a passive antenna. Place the antenna with a clear view of the sky; with a poor view the fix flickers and the server falls back to the RTC.
 
 ### I2C bus (RTC and LCD)
 

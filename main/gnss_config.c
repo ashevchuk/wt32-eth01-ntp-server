@@ -16,6 +16,7 @@
 #define ID_CFG_CFG 0x09
 #define ID_CFG_MSG 0x01
 #define ID_CFG_PRT 0x00
+#define ID_CFG_ITFM 0x39
 
 #define NAV5_PAYLOAD_SIZE 36
 #define NAV5_MASK_DYNMODEL 0x0001
@@ -27,6 +28,13 @@
 #define TP5_TIME_PULSE_INDEX 0
 #define TP5_OFFSET_CABLE_DELAY 4
 #define TP5_OFFSET_USER_DELAY 24
+
+#define ITFM_PAYLOAD_SIZE 8
+#define ITFM_ENABLE (1u << 31)
+#define ITFM_OFFSET_CONFIG2 4
+#define ITFM_ANTENNA_SHIFT 12
+#define ITFM_ANTENNA_MASK (3u << ITFM_ANTENNA_SHIFT)
+#define ITFM_ANTENNA_ACTIVE 2u
 
 #define PRT_PAYLOAD_SIZE 20
 #define PRT_PORT_UART1 1
@@ -93,6 +101,26 @@ static esp_err_t ensure_stationary(bool *changed)
         put_u16(nav5 + NAV5_OFFSET_MASK, NAV5_MASK_DYNMODEL);
         nav5[NAV5_OFFSET_DYNMODEL] = DYNAMIC_MODEL_STATIONARY;
         ESP_RETURN_ON_ERROR(ubx_set(CLASS_CFG, ID_CFG_NAV5, nav5, sizeof(nav5)), TAG, "write NAV5");
+        *changed = true;
+    }
+    return ESP_OK;
+}
+
+// Without the interference monitor the receiver reports its jamming state as unknown, and it judges the signal level
+// differently for an active and a passive antenna. The antenna here is active. The thresholds stay as the receiver has them.
+static esp_err_t ensure_interference_monitor(bool *changed)
+{
+    uint8_t itfm[ITFM_PAYLOAD_SIZE];
+    size_t length;
+    ESP_RETURN_ON_ERROR(ubx_poll(CLASS_CFG, ID_CFG_ITFM, NULL, 0, itfm, sizeof(itfm), &length), TAG, "read interference monitor");
+    ESP_RETURN_ON_FALSE(length == ITFM_PAYLOAD_SIZE, ESP_ERR_INVALID_SIZE, TAG, "interference monitor reply");
+    const uint32_t config = get_u32(itfm);
+    const uint32_t config2 = get_u32(itfm + ITFM_OFFSET_CONFIG2);
+    const bool antenna_active = (config2 & ITFM_ANTENNA_MASK) == (ITFM_ANTENNA_ACTIVE << ITFM_ANTENNA_SHIFT);
+    if (!(config & ITFM_ENABLE) || !antenna_active) {
+        put_u32(itfm, config | ITFM_ENABLE);
+        put_u32(itfm + ITFM_OFFSET_CONFIG2, (config2 & ~ITFM_ANTENNA_MASK) | (ITFM_ANTENNA_ACTIVE << ITFM_ANTENNA_SHIFT));
+        ESP_RETURN_ON_ERROR(ubx_set(CLASS_CFG, ID_CFG_ITFM, itfm, sizeof(itfm)), TAG, "write interference monitor");
         *changed = true;
     }
     return ESP_OK;
@@ -197,6 +225,7 @@ static esp_err_t apply(bool *written)
     ESP_RETURN_ON_ERROR(ensure_delays(&wanted, &changed), TAG, "delays");
     ESP_RETURN_ON_ERROR(ensure_ubx_output(&changed), TAG, "ubx output");
     ESP_RETURN_ON_ERROR(ensure_periodic_messages(&changed), TAG, "periodic messages");
+    ESP_RETURN_ON_ERROR(ensure_interference_monitor(&changed), TAG, "interference monitor");
 
     bool saved = false;
     *written = changed;
