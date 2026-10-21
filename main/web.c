@@ -590,8 +590,8 @@ static esp_err_t sensors_get_handler(httpd_req_t *req)
     out.length = 0;
     json_printf(&out, "[");
     for (size_t i = 0; i < count; i++) {
-        json_printf(&out, "%s{\"id\":\"%s\",\"name\":\"%s\",\"present\":%s,\"temperature\":", i ? "," : "",
-                    sensors[i].id, sensors[i].name, sensors[i].present ? "true" : "false");
+        json_printf(&out, "%s{\"id\":\"%s\",\"name\":\"%s\",\"munin\":%s,\"present\":%s,\"temperature\":", i ? "," : "",
+                    sensors[i].id, sensors[i].name, sensors[i].munin ? "true" : "false", sensors[i].present ? "true" : "false");
         if (sensors[i].has_reading) {
             json_printf(&out, "%.2f}", sensors[i].temperature_c);
         } else {
@@ -606,22 +606,40 @@ static esp_err_t sensors_get_handler(httpd_req_t *req)
 
 static esp_err_t sensors_post_handler(httpd_req_t *req)
 {
-    char form[FORM_BUFFER_SIZE], id[PARAM_SIZE], name[PARAM_SIZE];
-    if (!read_form(req, form) || !form_value(form, "id", id) || !form_value(form, "name", name)) {
-        return web_respond(req, HTTPD_400, "missing id or name");
+    char form[FORM_BUFFER_SIZE], id[PARAM_SIZE], name[PARAM_SIZE], munin[PARAM_SIZE];
+    if (!read_form(req, form) || !form_value(form, "id", id)) {
+        return web_respond(req, HTTPD_400, "missing sensor id");
     }
-    switch (sensors_rename(id, name)) {
-    case ESP_OK:
-        return web_respond(req, HTTPD_200, "name saved");
-    case ESP_ERR_NOT_FOUND:
-        return web_respond(req, HTTPD_400, "unknown sensor");
-    case ESP_ERR_INVALID_STATE:
-        return web_respond(req, HTTP_STATUS_CONFLICT, "name already used by another sensor");
-    case ESP_ERR_INVALID_ARG:
-        return web_respond(req, HTTPD_400, "name must be letters, digits or underscore, not starting with a digit");
-    default:
-        return web_respond(req, HTTPD_500, "could not store the name");
+    const bool has_name = form_value(form, "name", name);
+    const bool has_munin = form_value(form, "munin", munin);
+    if (!has_name && !has_munin) {
+        return web_respond(req, HTTPD_400, "nothing to change");
     }
+    if (has_munin) {
+        switch (sensors_set_munin(id, strcmp(munin, "1") == 0)) {
+        case ESP_OK:
+            break;
+        case ESP_ERR_NOT_FOUND:
+            return web_respond(req, HTTPD_400, "unknown sensor");
+        default:
+            return web_respond(req, HTTPD_500, "could not store the setting");
+        }
+    }
+    if (has_name) {
+        switch (sensors_rename(id, name)) {
+        case ESP_OK:
+            break;
+        case ESP_ERR_NOT_FOUND:
+            return web_respond(req, HTTPD_400, "unknown sensor");
+        case ESP_ERR_INVALID_STATE:
+            return web_respond(req, HTTP_STATUS_CONFLICT, "name already used by another sensor");
+        case ESP_ERR_INVALID_ARG:
+            return web_respond(req, HTTPD_400, "name must be letters, digits or underscore, not starting with a digit");
+        default:
+            return web_respond(req, HTTPD_500, "could not store the name");
+        }
+    }
+    return web_respond(req, HTTPD_200, has_name ? "name saved" : "Munin setting saved");
 }
 
 static esp_err_t munin_get_handler(httpd_req_t *req)

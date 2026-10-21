@@ -41,6 +41,8 @@ button:disabled, input:disabled { opacity: .5; cursor: not-allowed; }
 .sensor .reading { font: 600 20px/1.2 ui-monospace, monospace; text-align: right; }
 .sensor .id { grid-column: 1 / -1; color: var(--muted); font-size: 12px; word-break: break-all; }
 .sensor button { width: auto; }
+.sensor .munin-toggle { display: flex; align-items: center; gap: 6px; justify-self: end; color: var(--text); font-size: 13px; }
+.sensor .munin-toggle input { width: auto; }
 progress { width: 100%; }
 .wide { grid-column: 1 / -1; }
 .signals { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 16px 24px; align-items: start; }
@@ -224,7 +226,7 @@ progress { width: 100%; }
         <input id="plugin-name" maxlength="31" spellcheck="false" autocomplete="off">
         <button type="submit">Save plugin name</button>
       </form>
-      <div class="result" id="sensor-result">The name is the Munin field name: letters, digits, underscore. Leave empty to keep the sensor out of Munin.</div>
+      <div class="result" id="sensor-result">The name is the Munin field name: letters, digits, underscore. Leave it empty to restore the default. The checkbox publishes the sensor in Munin.</div>
     </section>
     <section class="card">
       <h2>Firmware update</h2>
@@ -548,7 +550,6 @@ function buildSensorRow(sensor) {
   row.className = "sensor";
   const input = document.createElement("input");
   input.value = sensor.name;
-  input.placeholder = "Not exported to Munin";
   input.maxLength = 31;
   input.spellcheck = false;
   input.autocomplete = "off";
@@ -556,15 +557,24 @@ function buildSensorRow(sensor) {
   reading.className = "reading";
   const save = document.createElement("button");
   save.textContent = "Save name";
+  const toggle = document.createElement("label");
+  toggle.className = "munin-toggle";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.checked = sensor.munin;
+  toggle.append(box, "Show in Munin");
   const id = document.createElement("div");
   id.className = "id";
   id.textContent = sensor.id;
-  row.append(input, reading, save, id);
+  row.append(input, reading, save, toggle, id);
   row.addEventListener("submit", e => {
     e.preventDefault();
     post("/api/sensors", { id: sensor.id, name: input.value.trim() }, "sensor-result");
   });
-  return { row, input, reading };
+  box.addEventListener("change", () => {
+    post("/api/sensors", { id: sensor.id, munin: box.checked ? "1" : "0" }, "sensor-result");
+  });
+  return { row, input, reading, box };
 }
 
 function renderSensors(sensors) {
@@ -581,6 +591,9 @@ function renderSensors(sensors) {
     if (document.activeElement !== entry.input && entry.input.value !== sensor.name &&
         !entry.input.dataset.edited) {
       entry.input.value = sensor.name;
+    }
+    if (document.activeElement !== entry.box) {
+      entry.box.checked = sensor.munin;
     }
     entry.reading.textContent = sensor.temperature === null ? "no data" : sensor.temperature.toFixed(2) + " °C";
     entry.reading.className = "reading" + (sensor.temperature === null ? " bad" : "");

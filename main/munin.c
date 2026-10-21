@@ -266,7 +266,7 @@ static void reply_list(int client)
     const size_t sensor_count = sensors_snapshot(sensors);
     bool any_named = false;
     for (size_t i = 0; i < sensor_count; i++) {
-        any_named = any_named || sensors[i].name[0];
+        any_named = any_named || sensors[i].munin;
     }
     char plugin[SETTINGS_MUNIN_PLUGIN_MAX_LENGTH];
     munin_get_plugin_name(plugin);
@@ -299,7 +299,7 @@ static void reply_config(int client)
                           "graph_category sensors\n"
                           "graph_args --base 1000\n");
     for (size_t i = 0; i < count && length < (int)sizeof(reply); i++) {
-        if (!sensors[i].name[0]) {
+        if (!sensors[i].munin) {
             continue;
         }
         length += snprintf(reply + length, sizeof(reply) - length, "%s.label %s\n%s.info DS18B20 %s\n",
@@ -316,7 +316,7 @@ static void reply_fetch(int client)
     char reply[REPLY_SIZE];
     int length = 0;
     for (size_t i = 0; i < count && length < (int)sizeof(reply); i++) {
-        if (!sensors[i].name[0]) {
+        if (!sensors[i].munin) {
             continue;
         }
         if (sensors[i].has_reading) {

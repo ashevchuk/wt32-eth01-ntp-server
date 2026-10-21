@@ -47,10 +47,13 @@
 #define POWER_ON_TEMPERATURE_RAW 0x0550
 #define POWER_ON_COUNT_REMAIN 0x0C
 #define DEGREES_PER_LSB 0.0625f
+#define DEFAULT_NAME_SERIAL_BYTES 6
 
 struct sensor {
     uint8_t rom[SETTINGS_ROM_LENGTH];
     char name[SETTINGS_SENSOR_NAME_MAX_LENGTH];
+    bool custom_name;
+    bool munin;
     bool present;
     bool has_reading;
     float temperature_c;
@@ -62,6 +65,7 @@ static const char *TAG = "sensors";
 static struct sensor table[SENSORS_MAX];
 static size_t table_size;
 static sensor_name_t stored_names[SENSORS_MAX];
+static uint8_t munin_roms[SENSORS_MAX][SETTINGS_ROM_LENGTH];
 static portMUX_TYPE table_lock = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE bus_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -200,6 +204,34 @@ static void rom_to_id(const uint8_t rom[SETTINGS_ROM_LENGTH], char id[SENSOR_ID_
     }
 }
 
+static void default_name(const uint8_t rom[SETTINGS_ROM_LENGTH], char name[SETTINGS_SENSOR_NAME_MAX_LENGTH])
+{
+    int length = snprintf(name, SETTINGS_SENSOR_NAME_MAX_LENGTH, "ds18b20_");
+    for (int i = 1; i <= DEFAULT_NAME_SERIAL_BYTES; i++) {
+        length += snprintf(name + length, SETTINGS_SENSOR_NAME_MAX_LENGTH - length, "%02x", rom[i]);
+    }
+}
+
+static bool rom_unused(const uint8_t rom[SETTINGS_ROM_LENGTH])
+{
+    for (int i = 0; i < SETTINGS_ROM_LENGTH; i++) {
+        if (rom[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool published_in_munin(const uint8_t rom[SETTINGS_ROM_LENGTH])
+{
+    for (size_t i = 0; i < SENSORS_MAX; i++) {
+        if (memcmp(munin_roms[i], rom, SETTINGS_ROM_LENGTH) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool sensors_name_valid(const char *name)
 {
     const size_t length = strlen(name);
@@ -247,7 +279,11 @@ static void register_found(const uint8_t rom[SETTINGS_ROM_LENGTH])
         const char *stored = stored_name_for(rom);
         if (stored) {
             snprintf(entry->name, sizeof(entry->name), "%s", stored);
+            entry->custom_name = true;
+        } else {
+            default_name(rom, entry->name);
         }
+        entry->munin = published_in_munin(rom);
     }
     portEXIT_CRITICAL(&table_lock);
     if (!known) {
@@ -350,6 +386,7 @@ size_t sensors_snapshot(sensor_info_t out[SENSORS_MAX])
     for (size_t i = 0; i < count; i++) {
         rom_to_id(table[i].rom, out[i].id);
         snprintf(out[i].name, sizeof(out[i].name), "%s", table[i].name);
+        out[i].munin = table[i].munin;
         out[i].present = table[i].present;
         out[i].has_reading = table[i].present && table[i].has_reading
                              && now_us - table[i].reading_us < READING_MAX_AGE_US;
@@ -359,42 +396,52 @@ size_t sensors_snapshot(sensor_info_t out[SENSORS_MAX])
     return count;
 }
 
-esp_err_t sensors_rename(const char *id, const char *name)
+static struct sensor *find_by_id(const char *id)
 {
-    const bool unnamed = name[0] == '\0';
-    if (!unnamed && !sensors_name_valid(name)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    esp_err_t result = ESP_ERR_NOT_FOUND;
-    portENTER_CRITICAL(&table_lock);
-    struct sensor *target = NULL;
     for (size_t i = 0; i < table_size; i++) {
         char candidate[SENSOR_ID_LENGTH];
         rom_to_id(table[i].rom, candidate);
         if (strcmp(candidate, id) == 0) {
-            target = &table[i];
+            return &table[i];
         }
     }
+    return NULL;
+}
+
+esp_err_t sensors_rename(const char *id, const char *name)
+{
+    const bool use_default = name[0] == '\0';
+    if (!use_default && !sensors_name_valid(name)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t result = ESP_ERR_NOT_FOUND;
+    sensor_name_t to_store[SENSORS_MAX] = {0};
+    portENTER_CRITICAL(&table_lock);
+    struct sensor *target = find_by_id(id);
     if (target) {
         result = ESP_OK;
+        char new_name[SETTINGS_SENSOR_NAME_MAX_LENGTH];
+        if (use_default) {
+            default_name(target->rom, new_name);
+        } else {
+            snprintf(new_name, sizeof(new_name), "%s", name);
+        }
         for (size_t i = 0; i < table_size; i++) {
-            if (!unnamed && &table[i] != target && strcmp(table[i].name, name) == 0) {
+            if (&table[i] != target && strcmp(table[i].name, new_name) == 0) {
                 result = ESP_ERR_INVALID_STATE;
             }
         }
         if (result == ESP_OK) {
-            snprintf(target->name, sizeof(target->name), "%s", name);
-        }
-    }
-    sensor_name_t to_store[SENSORS_MAX] = {0};
-    if (result == ESP_OK) {
-        size_t used = 0;
-        for (size_t i = 0; i < table_size; i++) {
-            if (table[i].name[0]) {
-                memcpy(to_store[used].rom, table[i].rom, SETTINGS_ROM_LENGTH);
-                snprintf(to_store[used].name, sizeof(to_store[used].name), "%s", table[i].name);
-                used++;
+            snprintf(target->name, sizeof(target->name), "%s", new_name);
+            target->custom_name = !use_default;
+            size_t used = 0;
+            for (size_t i = 0; i < table_size; i++) {
+                if (table[i].custom_name) {
+                    memcpy(to_store[used].rom, table[i].rom, SETTINGS_ROM_LENGTH);
+                    snprintf(to_store[used].name, sizeof(to_store[used].name), "%s", table[i].name);
+                    used++;
+                }
             }
         }
     }
@@ -403,6 +450,41 @@ esp_err_t sensors_rename(const char *id, const char *name)
     if (result == ESP_OK) {
         memcpy(stored_names, to_store, sizeof(stored_names));
         ESP_RETURN_ON_ERROR(settings_save_sensor_names(to_store), TAG, "store names");
+    }
+    return result;
+}
+
+esp_err_t sensors_set_munin(const char *id, bool enabled)
+{
+    esp_err_t result = ESP_ERR_NOT_FOUND;
+    uint8_t to_store[SENSORS_MAX][SETTINGS_ROM_LENGTH];
+    portENTER_CRITICAL(&table_lock);
+    struct sensor *target = find_by_id(id);
+    if (target) {
+        result = ESP_OK;
+        for (size_t i = 0; i < SENSORS_MAX; i++) {
+            if (memcmp(munin_roms[i], target->rom, SETTINGS_ROM_LENGTH) == 0) {
+                memset(munin_roms[i], 0, SETTINGS_ROM_LENGTH);
+            }
+        }
+        if (enabled) {
+            result = ESP_ERR_NO_MEM;
+            for (size_t i = 0; i < SENSORS_MAX && result != ESP_OK; i++) {
+                if (rom_unused(munin_roms[i])) {
+                    memcpy(munin_roms[i], target->rom, SETTINGS_ROM_LENGTH);
+                    result = ESP_OK;
+                }
+            }
+        }
+        if (result == ESP_OK) {
+            target->munin = enabled;
+            memcpy(to_store, munin_roms, sizeof(to_store));
+        }
+    }
+    portEXIT_CRITICAL(&table_lock);
+
+    if (result == ESP_OK) {
+        ESP_RETURN_ON_ERROR(settings_save_munin_sensors(to_store), TAG, "store munin sensors");
     }
     return result;
 }
@@ -417,6 +499,7 @@ esp_err_t sensors_start(void)
     ESP_RETURN_ON_ERROR(gpio_config(&cfg), TAG, "gpio");
     bus_release();
     ESP_RETURN_ON_ERROR(settings_load_sensor_names(stored_names), TAG, "load names");
+    ESP_RETURN_ON_ERROR(settings_load_munin_sensors(munin_roms), TAG, "load munin sensors");
     ESP_RETURN_ON_FALSE(xTaskCreatePinnedToCore(sensor_task, "sensors", SENSOR_TASK_STACK, NULL,
                                                 SENSOR_TASK_PRIORITY, NULL, SENSOR_TASK_CORE) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "task");

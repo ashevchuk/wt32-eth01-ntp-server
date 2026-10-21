@@ -21,6 +21,7 @@
 #define KEY_PPS_DELAY "pps_delay"
 #define KEY_UPSTREAM "upstream"
 #define KEY_RESETS "resets"
+#define KEY_MUNIN_SENSORS "munin_sensors"
 #define DEFAULT_UPSTREAM "pool.ntp.org"
 #define DEFAULT_MUNIN_PLUGIN "environment"
 #define DEFAULT_HOSTNAME "ntp-server"
@@ -234,6 +235,39 @@ const char *settings_network_error(const network_settings_t *network)
         }
     }
     return NULL;
+}
+
+esp_err_t settings_load_munin_sensors(uint8_t roms[SETTINGS_MAX_SENSORS][SETTINGS_ROM_LENGTH])
+{
+    memset(roms, 0, SETTINGS_MAX_SENSORS * SETTINGS_ROM_LENGTH);
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NAMESPACE, NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(err, TAG, "open");
+
+    uint8_t saved[SETTINGS_MAX_SENSORS][SETTINGS_ROM_LENGTH];
+    size_t size = sizeof(saved);
+    err = nvs_get_blob(handle, KEY_MUNIN_SENSORS, saved, &size);
+    nvs_close(handle);
+    if (err == ESP_OK && size == sizeof(saved)) {
+        memcpy(roms, saved, sizeof(saved));
+        return ESP_OK;
+    }
+    return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
+}
+
+esp_err_t settings_save_munin_sensors(const uint8_t roms[SETTINGS_MAX_SENSORS][SETTINGS_ROM_LENGTH])
+{
+    nvs_handle_t handle;
+    ESP_RETURN_ON_ERROR(nvs_open(NAMESPACE, NVS_READWRITE, &handle), TAG, "open");
+    esp_err_t err = nvs_set_blob(handle, KEY_MUNIN_SENSORS, roms, SETTINGS_MAX_SENSORS * SETTINGS_ROM_LENGTH);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
 }
 
 esp_err_t settings_load_sensor_names(sensor_name_t names[SETTINGS_MAX_SENSORS])
