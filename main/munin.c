@@ -48,26 +48,26 @@ static bool gnss_fresh(const gnss_status_t *status)
 
 static int fetch_satellites(char *out, size_t size)
 {
-    gnss_status_t status;
-    gnss_get_status(&status);
-    if (!gnss_fresh(&status)) {
-        return snprintf(out, size, "in_view.value " NO_VALUE "\nused.value " NO_VALUE "\ntracked.value " NO_VALUE "\n");
-    }
     gnss_satellite_t satellites[GNSS_MAX_SATELLITES];
     int64_t age_us;
     const size_t count = gnss_get_satellites(satellites, &age_us);
-    int tracked = 0;
+    if (age_us > GNSS_STALE_US) {
+        return snprintf(out, size, "in_view.value " NO_VALUE "\ntracked.value " NO_VALUE "\nlocked.value " NO_VALUE
+                                   "\nused.value " NO_VALUE "\nephemeris.value " NO_VALUE "\n");
+    }
+    int tracked = 0, locked = 0, used = 0, ephemeris = 0;
     for (size_t i = 0; i < count; i++) {
         tracked += satellites[i].snr_dbhz != GNSS_UNKNOWN;
+        locked += satellites[i].quality >= GNSS_QUALITY_LOCKED;
+        used += satellites[i].used;
+        ephemeris += satellites[i].ephemeris;
     }
-    return snprintf(out, size, "in_view.value %u\nused.value %u\ntracked.value %d\n", status.satellites_in_view,
-                    status.satellites_used, tracked);
+    return snprintf(out, size, "in_view.value %u\ntracked.value %d\nlocked.value %d\nused.value %d\nephemeris.value %d\n",
+                    (unsigned)count, tracked, locked, used, ephemeris);
 }
 
 static int fetch_signal(char *out, size_t size)
 {
-    gnss_status_t status;
-    gnss_get_status(&status);
     gnss_satellite_t satellites[GNSS_MAX_SATELLITES];
     int64_t age_us;
     const size_t count = gnss_get_satellites(satellites, &age_us);
@@ -79,7 +79,7 @@ static int fetch_signal(char *out, size_t size)
             strongest = satellites[i].snr_dbhz > strongest ? satellites[i].snr_dbhz : strongest;
         }
     }
-    if (!gnss_fresh(&status) || tracked == 0) {
+    if (age_us > GNSS_STALE_US || tracked == 0) {
         return snprintf(out, size, "mean.value " NO_VALUE "\nmax.value " NO_VALUE "\n");
     }
     return snprintf(out, size, "mean.value %.1f\nmax.value %d\n", (double)sum / tracked, strongest);
@@ -117,14 +117,46 @@ static int fetch_pps_jitter(char *out, size_t size)
     return snprintf(out, size, "jitter.value %.2f\n", pps.jitter_us);
 }
 
+static int fetch_time_accuracy(char *out, size_t size)
+{
+    gnss_pvt_t pvt;
+    gnss_get_pvt(&pvt);
+    if (!pvt.known || pvt.time_accuracy_ns < 0) {
+        return snprintf(out, size, "accuracy.value " NO_VALUE "\n");
+    }
+    return snprintf(out, size, "accuracy.value %lld\n", (long long)pvt.time_accuracy_ns);
+}
+
+static int fetch_interference(char *out, size_t size)
+{
+    gnss_hardware_t hardware;
+    gnss_get_hardware(&hardware);
+    if (!hardware.known) {
+        return snprintf(out, size, "jamming.value " NO_VALUE "\n");
+    }
+    return snprintf(out, size, "jamming.value %u\n", hardware.jamming_indicator);
+}
+
+static int fetch_agc(char *out, size_t size)
+{
+    gnss_hardware_t hardware;
+    gnss_get_hardware(&hardware);
+    if (!hardware.known) {
+        return snprintf(out, size, "agc.value " NO_VALUE "\n");
+    }
+    return snprintf(out, size, "agc.value %.1f\n", hardware.agc_percent);
+}
+
 static const struct builtin_plugin builtin_plugins[] = {
     {"gnss_satellites",
      "graph_title GNSS satellites\n"
      "graph_vlabel satellites\n"
      "graph_category gnss\n"
      "graph_args --base 1000 --lower-limit 0\n"
-     "in_view.label In view\n"
-     "tracked.label Tracked\n"
+     "in_view.label Reported by the receiver\n"
+     "tracked.label With a signal\n"
+     "locked.label Locked and time synchronised\n"
+     "ephemeris.label With ephemeris\n"
      "used.label Used in fix\n",
      fetch_satellites},
     {"gnss_signal",
@@ -158,6 +190,29 @@ static const struct builtin_plugin builtin_plugins[] = {
      "graph_args --base 1000 --lower-limit 0\n"
      "jitter.label Standard deviation of the pulse interval\n",
      fetch_pps_jitter},
+    {"gnss_time_accuracy",
+     "graph_title GNSS time accuracy estimate\n"
+     "graph_vlabel ns\n"
+     "graph_category gnss\n"
+     "graph_args --base 1000 --lower-limit 0\n"
+     "accuracy.label Estimated time error\n"
+     "accuracy.info Receiver's estimate of its time error; unknown without a fix\n",
+     fetch_time_accuracy},
+    {"gnss_interference",
+     "graph_title GNSS interference indicator\n"
+     "graph_vlabel 0 - 255\n"
+     "graph_category gnss\n"
+     "graph_args --base 1000 --lower-limit 0 --upper-limit 255\n"
+     "jamming.label Continuous-wave interference\n"
+     "jamming.info 0 means none, 255 strong\n",
+     fetch_interference},
+    {"gnss_agc",
+     "graph_title GNSS receiver AGC\n"
+     "graph_vlabel percent\n"
+     "graph_category gnss\n"
+     "graph_args --base 1000 --lower-limit 0 --upper-limit 100\n"
+     "agc.label Gain control level\n",
+     fetch_agc},
 };
 #define BUILTIN_PLUGIN_COUNT (sizeof(builtin_plugins) / sizeof(builtin_plugins[0]))
 

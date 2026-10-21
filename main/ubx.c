@@ -19,6 +19,8 @@
 #define RX_QUEUE_LENGTH 4
 #define REPLY_TIMEOUT_MS 1000
 #define FRAME_GAP_TIMEOUT_US 100000
+// NAV-SAT with 64 satellites is 776 bytes.
+#define RX_MAX_PAYLOAD 800
 
 struct frame {
     uint8_t cls;
@@ -33,7 +35,8 @@ static uart_port_t uart_port;
 static QueueHandle_t rx_queue;
 static SemaphoreHandle_t transaction_lock;
 
-static uint8_t rx_buffer[HEADER_SIZE + UBX_MAX_PAYLOAD + CHECKSUM_SIZE];
+static uint8_t rx_buffer[HEADER_SIZE + RX_MAX_PAYLOAD + CHECKSUM_SIZE];
+static ubx_handler_t handler;
 static size_t rx_position;
 static size_t rx_expected;
 static int64_t rx_last_byte_us;
@@ -57,6 +60,11 @@ esp_err_t ubx_init(uart_port_t port)
     return ESP_OK;
 }
 
+void ubx_set_handler(ubx_handler_t new_handler)
+{
+    handler = new_handler;
+}
+
 static void deliver_frame(void)
 {
     uint8_t a, b;
@@ -70,8 +78,13 @@ static void deliver_frame(void)
         .id = rx_buffer[3],
         .length = (uint16_t)(rx_buffer[4] | (rx_buffer[5] << 8)),
     };
-    memcpy(frame.payload, rx_buffer + HEADER_SIZE, frame.length);
-    xQueueSend(rx_queue, &frame, 0);
+    if (handler) {
+        handler(frame.cls, frame.id, rx_buffer + HEADER_SIZE, frame.length);
+    }
+    if (frame.length <= UBX_MAX_PAYLOAD) {
+        memcpy(frame.payload, rx_buffer + HEADER_SIZE, frame.length);
+        xQueueSend(rx_queue, &frame, 0);
+    }
 }
 
 bool ubx_feed(uint8_t byte)
@@ -97,7 +110,7 @@ bool ubx_feed(uint8_t byte)
     rx_buffer[rx_position++] = byte;
     if (rx_position == HEADER_SIZE) {
         const size_t length = (size_t)(rx_buffer[4] | (rx_buffer[5] << 8));
-        if (length > UBX_MAX_PAYLOAD) {
+        if (length > RX_MAX_PAYLOAD) {
             rx_position = 0;
             return true;
         }

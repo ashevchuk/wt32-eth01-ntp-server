@@ -10,10 +10,12 @@
 
 #include "esp_app_desc.h"
 #include "esp_check.h"
+#include "esp_core_dump.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -33,7 +35,7 @@
 #include "upstream.h"
 #include "wifi.h"
 
-#define STATUS_BUFFER_SIZE 1536
+#define STATUS_BUFFER_SIZE 2048
 #define MICROS_PER_SECOND 1000000LL
 #define ETH_NETIF_KEY "ETH_DEF"
 #define MAC_LENGTH 6
@@ -42,10 +44,12 @@
 #define IP_TEXT_LENGTH 16
 #define MAC_TEXT_LENGTH 18
 #define HTTP_STACK_SIZE 8192
-#define HTTP_MAX_URI_HANDLERS 20
+#define HTTP_MAX_URI_HANDLERS 24
+#define COREDUMP_CHUNK_SIZE 1024
+#define ELF_SHA_TEXT_LENGTH 17
 #define RESETS_BODY_SIZE 1024
 #define SATELLITES_CHUNK_SIZE 768
-#define SATELLITE_ENTRY_SIZE 112
+#define SATELLITE_ENTRY_SIZE 176
 #define NUMBER_TEXT_SIZE 8
 // The lwIP socket pool is shared with the HTTP listener and control socket, NTP, Munin and the SNTP client.
 #define HTTP_MAX_OPEN_SOCKETS 8
@@ -61,6 +65,10 @@
 extern const char index_html_start[] asm("_binary_index_html_start");
 
 static const char *TAG = "web";
+
+// Size of the crash dump in flash, 0 when there is none. The image is verified once at start and after erasing,
+// because checking it reads the whole partition.
+static size_t coredump_size;
 
 struct json_out {
     char buffer[STATUS_BUFFER_SIZE];
@@ -169,9 +177,24 @@ static void write_gnss(struct json_out *out)
     gnss_pps_t pps;
     gnss_get_pps(&pps);
     json_printf(out, "\"pps\":{\"present\":%s,\"pulses\":%lu,\"samples\":%u,\"offset_ppm\":%.2f,\"jitter_us\":%.2f,"
-                     "\"min_us\":%ld,\"max_us\":%ld}}",
+                     "\"min_us\":%ld,\"max_us\":%ld},",
                 pps.present ? "true" : "false", (unsigned long)pps.pulses, pps.samples, pps.offset_ppm, pps.jitter_us,
                 (long)pps.min_error_us, (long)pps.max_error_us);
+
+    gnss_pvt_t pvt;
+    gnss_get_pvt(&pvt);
+    json_printf(out, "\"pvt\":{\"known\":%s,\"fix_type\":%u,\"fix_ok\":%s,\"time_valid\":%s,\"time_resolved\":%s,"
+                     "\"time_trusted\":%s,\"satellites\":%u,\"time_accuracy_ns\":%lld,\"horizontal_accuracy_m\":%.2f},",
+                pvt.known ? "true" : "false", pvt.fix_type, pvt.fix_ok ? "true" : "false", pvt.time_valid ? "true" : "false",
+                pvt.time_resolved ? "true" : "false", pvt.time_trusted ? "true" : "false", pvt.satellites,
+                (long long)pvt.time_accuracy_ns, pvt.horizontal_accuracy_m);
+
+    gnss_hardware_t hardware;
+    gnss_get_hardware(&hardware);
+    json_printf(out, "\"hardware\":{\"known\":%s,\"antenna\":%u,\"jamming_state\":%u,\"jamming_indicator\":%u,"
+                     "\"agc_percent\":%.1f,\"noise\":%u}}",
+                hardware.known ? "true" : "false", hardware.antenna_status, hardware.jamming_state,
+                hardware.jamming_indicator, hardware.agc_percent, hardware.noise_per_ms);
 }
 
 static void json_string(struct json_out *out, const char *text)
@@ -263,15 +286,17 @@ static esp_err_t status_handler(httpd_req_t *req)
     out.length = 0;
 
     const esp_app_desc_t *app = esp_app_get_description();
+    char elf_sha[ELF_SHA_TEXT_LENGTH];
+    esp_app_get_elf_sha256(elf_sha, sizeof(elf_sha));
     json_printf(&out, "{");
     write_time(&out);
     json_printf(&out, ",\"ntp\":{\"requests\":%lu},", (unsigned long)ntp_server_request_count());
     write_gnss(&out);
     json_printf(&out, ",");
     write_network(&out);
-    json_printf(&out, ",\"system\":{\"version\":\"%s\",\"idf\":\"%s\",\"partition\":\"%s\",\"reset_reason\":\"%s\",\"uptime_s\":%lld,\"free_heap\":%lu}}",
+    json_printf(&out, ",\"system\":{\"version\":\"%s\",\"idf\":\"%s\",\"partition\":\"%s\",\"reset_reason\":\"%s\",\"uptime_s\":%lld,\"free_heap\":%lu,\"coredump_bytes\":%u,\"elf_sha\":\"%s\"}}",
                 app->version, app->idf_ver, ota_running_partition_label(), reset_reason_name(esp_reset_reason()), esp_timer_get_time() / MICROS_PER_SECOND,
-                (unsigned long)esp_get_free_heap_size());
+                (unsigned long)esp_get_free_heap_size(), (unsigned)coredump_size, elf_sha);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -501,6 +526,41 @@ static esp_err_t resets_clear_handler(httpd_req_t *req)
     return web_respond(req, HTTPD_200, "reset history cleared");
 }
 
+static void refresh_coredump_size(void)
+{
+    size_t address, size;
+    coredump_size = esp_core_dump_image_get(&address, &size) == ESP_OK ? size : 0;
+}
+
+static esp_err_t coredump_get_handler(httpd_req_t *req)
+{
+    size_t address, size;
+    const esp_partition_t *partition =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
+    if (!partition || esp_core_dump_image_get(&address, &size) != ESP_OK) {
+        return web_respond(req, HTTPD_404, "no crash dump stored");
+    }
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"coredump.bin\"");
+    uint8_t buffer[COREDUMP_CHUNK_SIZE];
+    for (size_t sent = 0; sent < size;) {
+        const size_t length = size - sent < sizeof(buffer) ? size - sent : sizeof(buffer);
+        ESP_RETURN_ON_ERROR(esp_partition_read(partition, address - partition->address + sent, buffer, length), TAG, "read");
+        ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(req, (const char *)buffer, length), TAG, "send");
+        sent += length;
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
+static esp_err_t coredump_erase_handler(httpd_req_t *req)
+{
+    if (esp_core_dump_image_erase() != ESP_OK) {
+        return web_respond(req, HTTPD_500, "could not erase the crash dump");
+    }
+    refresh_coredump_size();
+    return web_respond(req, HTTPD_200, "crash dump erased");
+}
+
 static esp_err_t reboot_handler(httpd_req_t *req)
 {
     web_respond(req, HTTPD_200, "restarting");
@@ -606,9 +666,11 @@ static esp_err_t satellites_handler(httpd_req_t *req)
         number_or_null(snr, satellites[i].snr_dbhz);
         char entry[SATELLITE_ENTRY_SIZE];
         const int entry_length = snprintf(entry, sizeof(entry),
-                                          "%s{\"talker\":\"%s\",\"id\":%u,\"elevation\":%s,\"azimuth\":%s,\"snr\":%s,\"used\":%s}",
-                                          i ? "," : "", satellites[i].talker, satellites[i].id, elevation, azimuth, snr,
-                                          satellites[i].used ? "true" : "false");
+                                          "%s{\"gnss\":%u,\"id\":%u,\"elevation\":%s,\"azimuth\":%s,\"snr\":%s,\"quality\":%u,"
+                                          "\"used\":%s,\"ephemeris\":%s,\"almanac\":%s}",
+                                          i ? "," : "", satellites[i].gnss_id, satellites[i].id, elevation, azimuth, snr,
+                                          satellites[i].quality, satellites[i].used ? "true" : "false",
+                                          satellites[i].ephemeris ? "true" : "false", satellites[i].almanac ? "true" : "false");
         if (length + entry_length >= (int)sizeof(chunk)) {
             ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(req, chunk, length), TAG, "send");
             length = 0;
@@ -698,6 +760,7 @@ static esp_err_t index_handler(httpd_req_t *req)
 
 esp_err_t web_start(void)
 {
+    refresh_coredump_size();
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = HTTP_STACK_SIZE;
     config.max_uri_handlers = HTTP_MAX_URI_HANDLERS;
@@ -715,6 +778,8 @@ esp_err_t web_start(void)
         {.uri = "/api/network", .method = HTTP_GET, .handler = network_get_handler},
         {.uri = "/api/network", .method = HTTP_POST, .handler = network_post_handler},
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_handler},
+        {.uri = "/api/coredump", .method = HTTP_GET, .handler = coredump_get_handler},
+        {.uri = "/api/coredump", .method = HTTP_POST, .handler = coredump_erase_handler},
         {.uri = "/api/resets", .method = HTTP_GET, .handler = resets_get_handler},
         {.uri = "/api/resets", .method = HTTP_POST, .handler = resets_clear_handler},
         {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_upload_handler},

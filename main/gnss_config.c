@@ -14,6 +14,8 @@
 #define ID_CFG_NAV5 0x24
 #define ID_CFG_TP5 0x31
 #define ID_CFG_CFG 0x09
+#define ID_CFG_MSG 0x01
+#define ID_CFG_PRT 0x00
 
 #define NAV5_PAYLOAD_SIZE 36
 #define NAV5_MASK_DYNMODEL 0x0001
@@ -26,11 +28,23 @@
 #define TP5_OFFSET_CABLE_DELAY 4
 #define TP5_OFFSET_USER_DELAY 24
 
+#define PRT_PAYLOAD_SIZE 20
+#define PRT_PORT_UART1 1
+#define PRT_OFFSET_OUT_PROTOCOLS 14
+#define PRT_PROTOCOL_UBX 0x0001
+
+#define CFG_MSG_REPLY_SIZE 8
+#define CFG_MSG_OFFSET_UART1_RATE 3
+#define CFG_MSG_SET_SIZE 3
+#define MESSAGE_RATE 1
+
 #define CFG_ALL_SECTIONS 0x0000FFFF
 #define CFG_DEVICE_BBR_AND_FLASH 0x03
 #define CFG_PAYLOAD_SIZE 13
 
 #define START_DELAY_MS 3000
+// The receiver needs a moment to apply a changed port setup before it answers again.
+#define PORT_RECONFIGURE_MS 300
 #define TASK_STACK_SIZE 4096
 #define TASK_PRIORITY 3
 
@@ -80,6 +94,50 @@ static esp_err_t ensure_stationary(bool *changed)
         nav5[NAV5_OFFSET_DYNMODEL] = DYNAMIC_MODEL_STATIONARY;
         ESP_RETURN_ON_ERROR(ubx_set(CLASS_CFG, ID_CFG_NAV5, nav5, sizeof(nav5)), TAG, "write NAV5");
         *changed = true;
+    }
+    return ESP_OK;
+}
+
+// Periodic UBX messages are only sent on a port that has UBX enabled for output; polls are answered either way.
+static esp_err_t ensure_ubx_output(bool *changed)
+{
+    const uint8_t request[] = {PRT_PORT_UART1};
+    uint8_t port[PRT_PAYLOAD_SIZE];
+    size_t length;
+    ESP_RETURN_ON_ERROR(ubx_poll(CLASS_CFG, ID_CFG_PRT, request, sizeof(request), port, sizeof(port), &length), TAG,
+                        "read port");
+    ESP_RETURN_ON_FALSE(length == PRT_PAYLOAD_SIZE, ESP_ERR_INVALID_SIZE, TAG, "port reply");
+    const uint16_t protocols = get_u16(port + PRT_OFFSET_OUT_PROTOCOLS);
+    if (!(protocols & PRT_PROTOCOL_UBX)) {
+        put_u16(port + PRT_OFFSET_OUT_PROTOCOLS, protocols | PRT_PROTOCOL_UBX);
+        ESP_RETURN_ON_ERROR(ubx_set(CLASS_CFG, ID_CFG_PRT, port, sizeof(port)), TAG, "write port");
+        vTaskDelay(pdMS_TO_TICKS(PORT_RECONFIGURE_MS));
+        *changed = true;
+    }
+    return ESP_OK;
+}
+
+// The receiver sends these once per navigation solution on this UART: satellites (UBX-NAV-SAT), time and fix
+// validity (UBX-NAV-PVT) and the antenna and interference monitor (UBX-MON-HW).
+static const struct {
+    uint8_t cls;
+    uint8_t id;
+} PERIODIC_MESSAGES[] = {{0x01, 0x35}, {0x01, 0x07}, {0x0A, 0x09}};
+
+static esp_err_t ensure_periodic_messages(bool *changed)
+{
+    for (size_t i = 0; i < sizeof(PERIODIC_MESSAGES) / sizeof(PERIODIC_MESSAGES[0]); i++) {
+        const uint8_t request[] = {PERIODIC_MESSAGES[i].cls, PERIODIC_MESSAGES[i].id};
+        uint8_t reply[CFG_MSG_REPLY_SIZE];
+        size_t length;
+        ESP_RETURN_ON_ERROR(ubx_poll(CLASS_CFG, ID_CFG_MSG, request, sizeof(request), reply, sizeof(reply), &length),
+                            TAG, "read message rate");
+        ESP_RETURN_ON_FALSE(length == CFG_MSG_REPLY_SIZE, ESP_ERR_INVALID_SIZE, TAG, "message rate reply");
+        if (reply[CFG_MSG_OFFSET_UART1_RATE] != MESSAGE_RATE) {
+            const uint8_t set[CFG_MSG_SET_SIZE] = {PERIODIC_MESSAGES[i].cls, PERIODIC_MESSAGES[i].id, MESSAGE_RATE};
+            ESP_RETURN_ON_ERROR(ubx_set(CLASS_CFG, ID_CFG_MSG, set, sizeof(set)), TAG, "write message rate");
+            *changed = true;
+        }
     }
     return ESP_OK;
 }
@@ -137,6 +195,8 @@ static esp_err_t apply(bool *written)
     bool changed = false;
     ESP_RETURN_ON_ERROR(ensure_stationary(&changed), TAG, "dynamic model");
     ESP_RETURN_ON_ERROR(ensure_delays(&wanted, &changed), TAG, "delays");
+    ESP_RETURN_ON_ERROR(ensure_ubx_output(&changed), TAG, "ubx output");
+    ESP_RETURN_ON_ERROR(ensure_periodic_messages(&changed), TAG, "periodic messages");
 
     bool saved = false;
     *written = changed;

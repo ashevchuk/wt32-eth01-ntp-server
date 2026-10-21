@@ -23,7 +23,7 @@
 #define GNSS_RX_GPIO GPIO_NUM_5
 #define GNSS_PPS_GPIO GPIO_NUM_35
 #define GNSS_BAUD 115200
-#define UART_RX_BUFFER_SIZE 1024
+#define UART_RX_BUFFER_SIZE 2048
 #define NMEA_MAX_LINE 128
 #define NMEA_MAX_FIELDS 24
 #define PPS_QUEUE_LENGTH 4
@@ -42,13 +42,43 @@
 #define GGA_FIELD_ALTITUDE 9
 #define GSA_FIELD_FIX_MODE 2
 #define GSA_FIELD_PDOP 15
-#define GSA_FIRST_SATELLITE_FIELD 3
-#define GSA_SATELLITE_SLOTS 12
-#define GSV_FIELD_MESSAGE_COUNT 1
-#define GSV_FIELD_MESSAGE_INDEX 2
 #define GSV_FIELD_IN_VIEW 3
-#define GSV_FIELD_FIRST_SATELLITE 4
-#define GSV_FIELDS_PER_SATELLITE 4
+#define UBX_CLASS_NAV 0x01
+#define UBX_CLASS_MON 0x0A
+#define UBX_ID_NAV_PVT 0x07
+#define UBX_ID_NAV_SAT 0x35
+#define UBX_ID_MON_HW 0x09
+#define NAV_SAT_HEADER_SIZE 8
+#define NAV_SAT_OFFSET_COUNT 5
+#define NAV_SAT_ENTRY_SIZE 12
+#define SAT_FLAGS_QUALITY_MASK 0x07
+#define SAT_FLAG_USED (1u << 3)
+#define SAT_FLAG_EPHEMERIS (1u << 11)
+#define SAT_FLAG_ALMANAC (1u << 12)
+#define SAT_ELEVATION_MIN_VALID (-90)
+#define PVT_PAYLOAD_SIZE 92
+#define PVT_OFFSET_VALID 11
+#define PVT_OFFSET_TIME_ACCURACY 12
+#define PVT_OFFSET_FIX_TYPE 20
+#define PVT_OFFSET_FLAGS 21
+#define PVT_OFFSET_SATELLITES 23
+#define PVT_OFFSET_HORIZONTAL_ACCURACY 40
+#define PVT_VALID_TIME 0x02
+#define PVT_VALID_RESOLVED 0x04
+#define PVT_FLAG_FIX_OK 0x01
+#define ACCURACY_UNKNOWN 0xFFFFFFFFu
+// Looser than any real fix: a larger estimate means the receiver does not know the time well.
+#define MAX_TIME_ACCURACY_NS 1000000
+#define HW_PAYLOAD_SIZE 60
+#define HW_OFFSET_NOISE 16
+#define HW_OFFSET_AGC 18
+#define HW_OFFSET_ANTENNA_STATUS 20
+#define HW_OFFSET_FLAGS 22
+#define HW_OFFSET_JAMMING_INDICATOR 45
+#define HW_JAMMING_STATE_SHIFT 2
+#define HW_JAMMING_STATE_MASK 0x03
+#define HW_AGC_MAX 8191.0f
+#define UBX_MESSAGE_STALE_US 3000000
 #define PPS_WINDOW 60
 #define PPS_NOMINAL_PERIOD_US 1000000
 // A larger deviation is a missed pulse or a restart, not jitter.
@@ -82,13 +112,13 @@ static gnss_status_t published_status;
 static uint8_t in_view_by_constellation[CONSTELLATION_COUNT];
 static portMUX_TYPE status_lock = portMUX_INITIALIZER_UNLOCKED;
 
-static gnss_satellite_t working_satellites[GNSS_MAX_SATELLITES];
-static size_t working_satellite_count;
 static gnss_satellite_t published_satellites[GNSS_MAX_SATELLITES];
 static size_t published_satellite_count;
 static int64_t satellites_updated_us;
-// One bit per satellite number, filled from the GSA sentences that follow each RMC.
-static uint8_t used_satellites[32];
+static gnss_pvt_t pvt_state;
+static int64_t pvt_updated_us;
+static gnss_hardware_t hardware_state;
+static int64_t hardware_updated_us;
 
 static gnss_pps_t pps_stats;
 static int64_t last_pps_us;
@@ -160,7 +190,15 @@ static void pps_task(void *arg)
         bool fresh = previous_us && xQueueReceive(rmc_queue, &sample, 0) == pdTRUE
                      && sample.received_us >= previous_us
                      && sample.received_us - previous_us < RMC_MAX_DELAY_US;
-        if (fresh && second_callback) {
+        gnss_pvt_t pvt;
+        gnss_get_pvt(&pvt);
+        static bool rejection_logged;
+        if (fresh && !pvt.time_trusted != rejection_logged) {
+            rejection_logged = !pvt.time_trusted;
+            ESP_LOGW(TAG, "GNSS time %s: valid %d resolved %d accuracy %lld ns", rejection_logged ? "rejected" : "accepted again",
+                     pvt.time_valid, pvt.time_resolved, (long long)pvt.time_accuracy_ns);
+        }
+        if (fresh && second_callback && pvt.time_trusted) {
             if (sample.utc.tm_sec != LEAP_SECOND_FIELD) {
                 sample.utc.tm_sec += 1;
             }
@@ -236,7 +274,6 @@ static void handle_rmc(char *fields[], int count)
     const bool valid = fields[RMC_FIELD_STATUS][0] == 'A';
     ESP_LOGI(TAG, "rmc fix=%s time=%s date=%s", valid ? "yes" : "no",
              fields[RMC_FIELD_TIME], fields[RMC_FIELD_DATE]);
-    memset(used_satellites, 0, sizeof(used_satellites));
 
     working_status.fix = valid;
     working_status.updated_us = esp_timer_get_time();
@@ -275,58 +312,6 @@ static void handle_gsa(char *fields[], int count)
     }
     working_status.fix_mode = (uint8_t)strtoul(fields[GSA_FIELD_FIX_MODE], NULL, 10);
     working_status.pdop = strtof(fields[GSA_FIELD_PDOP], NULL);
-    for (int i = GSA_FIRST_SATELLITE_FIELD; i < GSA_FIRST_SATELLITE_FIELD + GSA_SATELLITE_SLOTS; i++) {
-        const unsigned long id = strtoul(fields[i], NULL, 10);
-        if (has_value(fields[i]) && id < sizeof(used_satellites) * 8) {
-            used_satellites[id / 8] |= 1 << (id % 8);
-        }
-    }
-}
-
-static bool satellite_used(uint8_t id)
-{
-    return id != 0 && (used_satellites[id / 8] & (1 << (id % 8)));
-}
-
-static int16_t optional_number(const char *field)
-{
-    return has_value(field) ? (int16_t)strtol(field, NULL, 10) : GNSS_UNKNOWN;
-}
-
-// A GSV cycle is one sentence per page of four satellites and talker; the talker's list is replaced when its
-// first page arrives and published when the last one has.
-static void collect_satellites(const char *talker, char *fields[], int count)
-{
-    const unsigned long message_count = strtoul(fields[GSV_FIELD_MESSAGE_COUNT], NULL, 10);
-    const unsigned long message_index = strtoul(fields[GSV_FIELD_MESSAGE_INDEX], NULL, 10);
-    if (message_index == 1) {
-        size_t kept = 0;
-        for (size_t i = 0; i < working_satellite_count; i++) {
-            if (strncmp(working_satellites[i].talker, talker, TALKER_LENGTH) != 0) {
-                working_satellites[kept++] = working_satellites[i];
-            }
-        }
-        working_satellite_count = kept;
-    }
-    for (int i = GSV_FIELD_FIRST_SATELLITE; i + GSV_FIELDS_PER_SATELLITE <= count
-                                            && working_satellite_count < GNSS_MAX_SATELLITES;
-         i += GSV_FIELDS_PER_SATELLITE) {
-        gnss_satellite_t *satellite = &working_satellites[working_satellite_count++];
-        memcpy(satellite->talker, talker, TALKER_LENGTH);
-        satellite->talker[TALKER_LENGTH] = '\0';
-        satellite->id = (uint8_t)strtoul(fields[i], NULL, 10);
-        satellite->elevation_deg = optional_number(fields[i + 1]);
-        satellite->azimuth_deg = optional_number(fields[i + 2]);
-        satellite->snr_dbhz = optional_number(fields[i + 3]);
-        satellite->used = satellite_used(satellite->id);
-    }
-    if (message_index == message_count) {
-        portENTER_CRITICAL(&status_lock);
-        memcpy(published_satellites, working_satellites, sizeof(working_satellites));
-        published_satellite_count = working_satellite_count;
-        satellites_updated_us = esp_timer_get_time();
-        portEXIT_CRITICAL(&status_lock);
-    }
 }
 
 static void handle_gsv(const char *talker, char *fields[], int count)
@@ -342,7 +327,100 @@ static void handle_gsv(const char *talker, char *fields[], int count)
         total += in_view_by_constellation[i];
     }
     working_status.satellites_in_view = (uint8_t)total;
-    collect_satellites(talker, fields, count);
+}
+
+static uint16_t read_u16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
+
+static uint32_t read_u32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void handle_nav_sat(const uint8_t *payload, size_t length)
+{
+    static gnss_satellite_t parsed[GNSS_MAX_SATELLITES];
+    if (length < NAV_SAT_HEADER_SIZE) {
+        return;
+    }
+    size_t count = payload[NAV_SAT_OFFSET_COUNT];
+    count = count > (length - NAV_SAT_HEADER_SIZE) / NAV_SAT_ENTRY_SIZE ? (length - NAV_SAT_HEADER_SIZE) / NAV_SAT_ENTRY_SIZE : count;
+    count = count > GNSS_MAX_SATELLITES ? GNSS_MAX_SATELLITES : count;
+    for (size_t i = 0; i < count; i++) {
+        const uint8_t *entry = payload + NAV_SAT_HEADER_SIZE + i * NAV_SAT_ENTRY_SIZE;
+        const int elevation = (int8_t)entry[3];
+        const uint32_t flags = read_u32(entry + 8);
+        const bool has_direction = elevation >= SAT_ELEVATION_MIN_VALID;
+        parsed[i] = (gnss_satellite_t){
+            .gnss_id = entry[0],
+            .id = entry[1],
+            .elevation_deg = has_direction ? elevation : GNSS_UNKNOWN,
+            .azimuth_deg = has_direction ? (int16_t)read_u16(entry + 4) : GNSS_UNKNOWN,
+            .snr_dbhz = entry[2] ? entry[2] : GNSS_UNKNOWN,
+            .quality = flags & SAT_FLAGS_QUALITY_MASK,
+            .used = flags & SAT_FLAG_USED,
+            .ephemeris = flags & SAT_FLAG_EPHEMERIS,
+            .almanac = flags & SAT_FLAG_ALMANAC,
+        };
+    }
+    portENTER_CRITICAL(&status_lock);
+    memcpy(published_satellites, parsed, count * sizeof(gnss_satellite_t));
+    published_satellite_count = count;
+    satellites_updated_us = esp_timer_get_time();
+    portEXIT_CRITICAL(&status_lock);
+}
+
+static void handle_nav_pvt(const uint8_t *payload, size_t length)
+{
+    if (length < PVT_PAYLOAD_SIZE) {
+        return;
+    }
+    const uint32_t time_accuracy = read_u32(payload + PVT_OFFSET_TIME_ACCURACY);
+    const uint32_t horizontal_accuracy = read_u32(payload + PVT_OFFSET_HORIZONTAL_ACCURACY);
+    const gnss_pvt_t pvt = {
+        .fix_type = payload[PVT_OFFSET_FIX_TYPE],
+        .fix_ok = payload[PVT_OFFSET_FLAGS] & PVT_FLAG_FIX_OK,
+        .time_valid = payload[PVT_OFFSET_VALID] & PVT_VALID_TIME,
+        .time_resolved = payload[PVT_OFFSET_VALID] & PVT_VALID_RESOLVED,
+        .satellites = payload[PVT_OFFSET_SATELLITES],
+        .time_accuracy_ns = time_accuracy == ACCURACY_UNKNOWN ? -1 : (int64_t)time_accuracy,
+        .horizontal_accuracy_m = horizontal_accuracy == ACCURACY_UNKNOWN ? -1.0f : horizontal_accuracy / 1000.0f,
+    };
+    portENTER_CRITICAL(&status_lock);
+    pvt_state = pvt;
+    pvt_updated_us = esp_timer_get_time();
+    portEXIT_CRITICAL(&status_lock);
+}
+
+static void handle_mon_hw(const uint8_t *payload, size_t length)
+{
+    if (length < HW_PAYLOAD_SIZE) {
+        return;
+    }
+    const gnss_hardware_t hardware = {
+        .antenna_status = payload[HW_OFFSET_ANTENNA_STATUS],
+        .jamming_state = (payload[HW_OFFSET_FLAGS] >> HW_JAMMING_STATE_SHIFT) & HW_JAMMING_STATE_MASK,
+        .jamming_indicator = payload[HW_OFFSET_JAMMING_INDICATOR],
+        .agc_percent = read_u16(payload + HW_OFFSET_AGC) * 100.0f / HW_AGC_MAX,
+        .noise_per_ms = read_u16(payload + HW_OFFSET_NOISE),
+    };
+    portENTER_CRITICAL(&status_lock);
+    hardware_state = hardware;
+    hardware_updated_us = esp_timer_get_time();
+    portEXIT_CRITICAL(&status_lock);
+}
+
+static void on_ubx_message(uint8_t cls, uint8_t id, const uint8_t *payload, size_t length)
+{
+    if (cls == UBX_CLASS_NAV && id == UBX_ID_NAV_SAT) {
+        handle_nav_sat(payload, length);
+    } else if (cls == UBX_CLASS_NAV && id == UBX_ID_NAV_PVT) {
+        handle_nav_pvt(payload, length);
+    } else if (cls == UBX_CLASS_MON && id == UBX_ID_MON_HW) {
+        handle_mon_hw(payload, length);
+    }
 }
 
 static void handle_nmea_line(char *line)
@@ -391,6 +469,36 @@ size_t gnss_get_satellites(gnss_satellite_t satellites[GNSS_MAX_SATELLITES], int
     *age_us = satellites_updated_us ? esp_timer_get_time() - satellites_updated_us : INT64_MAX;
     portEXIT_CRITICAL(&status_lock);
     return count;
+}
+
+// RMC alone decides while no NAV-PVT arrives. Otherwise the receiver must report the time as valid and resolved, and
+// its accuracy estimate, when it has one, must be within the limit.
+static bool pvt_allows_time(const gnss_pvt_t *pvt)
+{
+    if (!pvt->known) {
+        return true;
+    }
+    if (!pvt->time_valid || !pvt->time_resolved) {
+        return false;
+    }
+    return pvt->time_accuracy_ns < 0 || pvt->time_accuracy_ns <= MAX_TIME_ACCURACY_NS;
+}
+
+void gnss_get_pvt(gnss_pvt_t *pvt)
+{
+    portENTER_CRITICAL(&status_lock);
+    *pvt = pvt_state;
+    pvt->known = pvt_updated_us && esp_timer_get_time() - pvt_updated_us < UBX_MESSAGE_STALE_US;
+    portEXIT_CRITICAL(&status_lock);
+    pvt->time_trusted = pvt_allows_time(pvt);
+}
+
+void gnss_get_hardware(gnss_hardware_t *hardware)
+{
+    portENTER_CRITICAL(&status_lock);
+    *hardware = hardware_state;
+    hardware->known = hardware_updated_us && esp_timer_get_time() - hardware_updated_us < UBX_MESSAGE_STALE_US;
+    portEXIT_CRITICAL(&status_lock);
 }
 
 void gnss_get_pps(gnss_pps_t *pps)
@@ -460,6 +568,7 @@ esp_err_t gnss_start(gnss_second_cb_t on_second)
 {
     second_callback = on_second;
     ESP_RETURN_ON_ERROR(ubx_init(GNSS_UART), TAG, "ubx");
+    ubx_set_handler(on_ubx_message);
     ESP_RETURN_ON_ERROR(start_uart(), TAG, "uart");
     ESP_RETURN_ON_ERROR(start_pps(), TAG, "pps");
     ESP_RETURN_ON_FALSE(xTaskCreate(nmea_task, "nmea", 4096, NULL, 5, NULL) == pdPASS,

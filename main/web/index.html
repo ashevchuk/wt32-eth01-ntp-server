@@ -46,7 +46,8 @@ progress { width: 100%; }
 .signals { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 16px 24px; align-items: start; }
 @media (max-width: 760px) { .signals { grid-template-columns: 1fr; } }
 .signals svg { display: block; width: 100%; }
-.signals .bars svg { max-height: 240px; }
+.signals .bars svg { height: 240px; }
+#sky-note { min-height: 2.9em; }
 .signals.stale svg { opacity: .35; }
 .signals .pps { margin-top: 14px; }
 .none { color: var(--muted); }
@@ -109,8 +110,17 @@ progress { width: 100%; }
           <div class="hint" id="sky-note"></div>
         </div>
         <div>
-          <div class="bars"><svg id="snr-bars" role="img" aria-label="Signal strength per satellite"></svg></div>
-          <div class="hint">Bar height is C/N0 in dB-Hz. Solid: used in the fix, faded or hollow: tracked only. Colour: green from 35, amber from 25, red below.</div>
+          <div class="bars"><svg id="snr-bars" preserveAspectRatio="xMinYMid meet" role="img" aria-label="Signal strength per satellite"></svg></div>
+          <div class="hint">Bar height is C/N0 in dB-Hz; colour: green from 35, amber from 25, red below. Solid bar: used in the fix, lighter: locked but unused, faint: detected but unusable. Square under the name: ephemeris known.</div>
+          <dl class="pps">
+            <dt title="Satellites with a signal / locked and time synchronised / used in the fix">Tracked / locked / used</dt><dd id="sat-quality">-</dd>
+            <dt title="Satellites with ephemeris / with almanac">Orbit data (ephemeris / almanac)</dt><dd id="sat-orbits">-</dd>
+            <dt title="Whether the receiver's time is accepted as the GNSS source">GNSS time</dt><dd id="rx-time-source">-</dd>
+            <dt title="The receiver's estimate of its time error">Time accuracy estimate</dt><dd id="rx-time-accuracy">-</dd>
+            <dt>Antenna</dt><dd id="rx-antenna">-</dd>
+            <dt title="Continuous-wave interference indicator, 0 none to 255 strong">Interference</dt><dd id="rx-jamming">-</dd>
+            <dt title="Receiver gain control level">AGC</dt><dd id="rx-agc">-</dd>
+          </dl>
           <dl class="pps">
             <dt>PPS</dt><dd id="pps-state">-</dd>
             <dt>Pulses received</dt><dd id="pps-pulses">-</dd>
@@ -235,9 +245,12 @@ progress { width: 100%; }
         <dt>Uptime</dt><dd id="uptime">-</dd>
         <dt>Last reset</dt><dd id="reset">-</dd>
         <dt>Reset history</dt><dd id="reset-history">-</dd>
+        <dt title="Core dump of the last crash, stored in flash">Crash dump</dt><dd id="coredump">-</dd>
+        <dt title="SHA-256 of the firmware ELF; the matching file is build/elf/&lt;prefix&gt;.elf">Build</dt><dd id="elf-sha">-</dd>
         <dt>Free heap</dt><dd id="heap">-</dd>
       </dl>
       <button type="button" class="secondary" id="reset-clear">Clear reset history</button>
+      <button type="button" class="secondary" id="coredump-clear" hidden>Erase crash dump</button>
       <div class="result" id="reset-result"></div>
     </section>
   </div>
@@ -311,6 +324,7 @@ function render(s) {
   }
 
   renderPps(g.pps);
+  renderReceiver(g);
 
   const e = s.network.eth;
   set("eth-mode", e.mode === "static" ? "static" : "DHCP");
@@ -330,6 +344,7 @@ function render(s) {
   set("idf", s.system.idf);
   set("slot", s.system.partition);
   set("uptime", duration(s.system.uptime_s));
+  renderCoredump(s.system);
   set("reset", s.system.reset_reason, NORMAL_RESETS.includes(s.system.reset_reason) ? "" : "bad");
   set("heap", (s.system.free_heap / 1024).toFixed(0) + " KiB");
 }
@@ -580,19 +595,11 @@ function svgEl(tag, attrs, text) {
   return e;
 }
 
-const CONSTELLATIONS = [
-  { letter: "G", name: "GPS" }, { letter: "S", name: "SBAS" }, { letter: "R", name: "GLONASS" },
-  { letter: "E", name: "Galileo" }, { letter: "C", name: "BeiDou" }, { letter: "J", name: "QZSS" },
-];
-function constellationOf(sat) {
-  if (sat.talker === "GL") return 2;
-  if (sat.talker === "GA") return 3;
-  if (sat.talker === "GB" || sat.talker === "BD") return 4;
-  if (sat.talker === "GQ" || sat.id >= 193) return 5;
-  return sat.id >= 33 ? 1 : 0;
-}
+// Receiver GNSS ids in display order.
+const CONSTELLATIONS = { 0: "G", 1: "S", 6: "R", 2: "E", 3: "C", 5: "J" };
+const CONSTELLATION_ORDER = [0, 1, 6, 2, 3, 5];
 function satelliteName(sat) {
-  return CONSTELLATIONS[constellationOf(sat)].letter + (sat.id ? String(sat.id).padStart(2, "0") : "?");
+  return (CONSTELLATIONS[sat.gnss] || "?") + String(sat.id).padStart(2, "0");
 }
 function strengthClass(snr) {
   if (snr === null) return "none";
@@ -637,7 +644,11 @@ function renderSky(sats) {
     : "Centre is overhead, the outer ring is the horizon. Filled: used in the fix.";
 }
 
-const BAR = { width: 20, gap: 8, height: 110, top: 14, labels: 20, left: 30, maxSnr: 50 };
+const BAR = { width: 20, gap: 8, height: 110, top: 14, labels: 30, left: 30, maxSnr: 50 };
+function satelliteOpacity(sat) {
+  if (sat.used) return 1;
+  return sat.quality >= LOCKED_QUALITY ? 0.7 : 0.35;
+}
 function renderBars(sats) {
   const svg = $("snr-bars");
   const width = BAR.left + Math.max(sats.length, 1) * (BAR.width + BAR.gap);
@@ -655,23 +666,61 @@ function renderBars(sats) {
     const snr = sat.snr === null ? 0 : Math.min(sat.snr, BAR.maxSnr);
     g.append(svgEl("rect", {
       x, y: y(snr), width: BAR.width, height: BAR.height * snr / BAR.maxSnr, fill: "currentColor",
-      opacity: sat.used ? 1 : 0.45,
+      opacity: satelliteOpacity(sat),
     }));
     if (sat.snr !== null) {
       g.append(svgEl("text", { x: x + BAR.width / 2, y: y(snr) - 3, "text-anchor": "middle", "font-size": 8, fill: "currentColor" }, String(sat.snr)));
     }
     g.append(svgEl("text", { x: x + BAR.width / 2, y: BAR.top + BAR.height + 12, "text-anchor": "middle", class: "svg-label" }, satelliteName(sat)));
+    g.append(svgEl("rect", {
+      x: x + BAR.width / 2 - 3, y: BAR.top + BAR.height + 18, width: 6, height: 6, fill: sat.ephemeris ? "currentColor" : "none",
+      stroke: "currentColor", "stroke-width": 1, class: "ephemeris",
+    }));
     parts.push(g);
   });
   svg.replaceChildren(...parts);
 }
 
 const SATELLITE_STALE_S = 5;
+const LOCKED_QUALITY = 4;
 function renderSignals(data) {
-  const sats = data.satellites.slice().sort((a, b) => constellationOf(a) - constellationOf(b) || a.id - b.id);
+  const sats = data.satellites.slice().sort((a, b) =>
+    CONSTELLATION_ORDER.indexOf(a.gnss) - CONSTELLATION_ORDER.indexOf(b.gnss) || a.id - b.id);
   $("signals").classList.toggle("stale", data.age_s < 0 || data.age_s > SATELLITE_STALE_S);
   renderSky(sats);
   renderBars(sats);
+  const tracked = sats.filter(s => s.snr !== null).length;
+  const locked = sats.filter(s => s.quality >= LOCKED_QUALITY).length;
+  const used = sats.filter(s => s.used).length;
+  set("sat-quality", sats.length ? tracked + " / " + locked + " / " + used : "-");
+  set("sat-orbits", sats.length ? sats.filter(s => s.ephemeris).length + " / " + sats.filter(s => s.almanac).length : "-");
+}
+
+const ANTENNA = { 0: "initialising", 1: "unknown", 2: "ok", 3: "short circuit", 4: "open circuit" };
+const JAMMING = { 0: "", 1: "ok", 2: "warning", 3: "critical" };
+function formatNanoseconds(ns) {
+  if (ns >= 1e6) return (ns / 1e6).toFixed(1) + " ms";
+  if (ns >= 1e3) return (ns / 1e3).toFixed(1) + " \u00b5s";
+  return ns + " ns";
+}
+function renderReceiver(g) {
+  const pvt = g.pvt, hw = g.hardware;
+  if (!pvt.known) {
+    set("rx-time-source", "no UBX data", "warn");
+    set("rx-time-accuracy", "-");
+  } else {
+    set("rx-time-source", pvt.time_trusted ? "accepted" : "rejected",
+        pvt.time_trusted ? "ok" : "bad");
+    set("rx-time-accuracy", pvt.time_accuracy_ns >= 0 ? formatNanoseconds(pvt.time_accuracy_ns) : "unknown");
+  }
+  if (!hw.known) {
+    set("rx-antenna", "-"); set("rx-jamming", "-"); set("rx-agc", "-");
+    return;
+  }
+  set("rx-antenna", ANTENNA[hw.antenna] || String(hw.antenna), hw.antenna >= 3 ? "bad" : hw.antenna === 2 ? "ok" : "");
+  set("rx-jamming", hw.jamming_indicator + " / 255" + (JAMMING[hw.jamming_state] ? ", " + JAMMING[hw.jamming_state] : ""),
+      hw.jamming_state === 3 ? "bad" : hw.jamming_state === 2 ? "warn" : "");
+  set("rx-agc", hw.agc_percent.toFixed(1) + " %");
 }
 
 function renderPps(p) {
@@ -686,6 +735,25 @@ function renderPps(p) {
   set("pps-range", p.min_us + " \u2026 " + p.max_us + " \u00b5s");
 }
 buildSky();
+
+function renderCoredump(system) {
+  set("elf-sha", system.elf_sha);
+  $("coredump-clear").hidden = !system.coredump_bytes;
+  if (!system.coredump_bytes) {
+    set("coredump", "none");
+    return;
+  }
+  const link = document.createElement("a");
+  link.href = "/api/coredump";
+  link.textContent = "download, " + Math.ceil(system.coredump_bytes / 1024) + " KiB";
+  const cell = $("coredump");
+  cell.className = "warn";
+  cell.replaceChildren(link);
+}
+$("coredump-clear").addEventListener("click", async () => {
+  if (!confirm("Erase the stored crash dump? Download it first if you need it.")) return;
+  await post("/api/coredump", {}, "reset-result");
+});
 
 const NORMAL_RESETS = ["power-on", "software", "external pin"];
 async function loadResets() {
