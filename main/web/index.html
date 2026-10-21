@@ -244,6 +244,7 @@ progress { width: 100%; }
         <dt>ESP-IDF</dt><dd id="idf">-</dd>
         <dt>Uptime</dt><dd id="uptime">-</dd>
         <dt>Last reset</dt><dd id="reset">-</dd>
+        <dt title="Components that did not start; the device keeps running without them">Startup</dt><dd id="startup">-</dd>
         <dt>Reset history</dt><dd id="reset-history">-</dd>
         <dt title="Core dump of the last crash, stored in flash">Crash dump</dt><dd id="coredump">-</dd>
         <dt title="SHA-256 of the firmware ELF; the matching file is build/elf/&lt;prefix&gt;.elf">Build</dt><dd id="elf-sha">-</dd>
@@ -736,7 +737,12 @@ function renderPps(p) {
 }
 buildSky();
 
+function renderStartup(system) {
+  set("startup", system.failed.length ? "not started: " + system.failed.join(", ") : "all components started",
+      system.failed.length ? "bad" : "");
+}
 function renderCoredump(system) {
+  renderStartup(system);
   set("elf-sha", system.elf_sha);
   $("coredump-clear").hidden = !system.coredump_bytes;
   if (!system.coredump_bytes) {

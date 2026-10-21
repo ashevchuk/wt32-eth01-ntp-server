@@ -32,6 +32,7 @@
 #include "rtc.h"
 #include "sensors.h"
 #include "settings.h"
+#include "startup.h"
 #include "upstream.h"
 #include "wifi.h"
 
@@ -47,6 +48,7 @@
 #define HTTP_MAX_URI_HANDLERS 24
 #define COREDUMP_CHUNK_SIZE 1024
 #define ELF_SHA_TEXT_LENGTH 17
+#define FAILED_TEXT_SIZE 320
 #define RESETS_BODY_SIZE 1024
 #define SATELLITES_CHUNK_SIZE 768
 #define SATELLITE_ENTRY_SIZE 176
@@ -280,13 +282,25 @@ static const char *reset_reason_name(esp_reset_reason_t reason)
     }
 }
 
+static void format_failed_components(char *out, size_t size)
+{
+    const char *components[STARTUP_MAX_FAILURES];
+    const size_t count = startup_get_failures(components);
+    size_t length = (size_t)snprintf(out, size, "[");
+    for (size_t i = 0; i < count && length < size; i++) {
+        length += (size_t)snprintf(out + length, size - length, "%s\"%s\"", i ? "," : "", components[i]);
+    }
+    snprintf(out + length, size > length ? size - length : 0, "]");
+}
+
 static esp_err_t status_handler(httpd_req_t *req)
 {
     static struct json_out out;
     out.length = 0;
 
     const esp_app_desc_t *app = esp_app_get_description();
-    char elf_sha[ELF_SHA_TEXT_LENGTH];
+    char elf_sha[ELF_SHA_TEXT_LENGTH], failed[FAILED_TEXT_SIZE];
+    format_failed_components(failed, sizeof(failed));
     esp_app_get_elf_sha256(elf_sha, sizeof(elf_sha));
     json_printf(&out, "{");
     write_time(&out);
@@ -294,9 +308,9 @@ static esp_err_t status_handler(httpd_req_t *req)
     write_gnss(&out);
     json_printf(&out, ",");
     write_network(&out);
-    json_printf(&out, ",\"system\":{\"version\":\"%s\",\"idf\":\"%s\",\"partition\":\"%s\",\"reset_reason\":\"%s\",\"uptime_s\":%lld,\"free_heap\":%lu,\"coredump_bytes\":%u,\"elf_sha\":\"%s\"}}",
+    json_printf(&out, ",\"system\":{\"version\":\"%s\",\"idf\":\"%s\",\"partition\":\"%s\",\"reset_reason\":\"%s\",\"uptime_s\":%lld,\"free_heap\":%lu,\"coredump_bytes\":%u,\"elf_sha\":\"%s\",\"failed\":%s}}",
                 app->version, app->idf_ver, ota_running_partition_label(), reset_reason_name(esp_reset_reason()), esp_timer_get_time() / MICROS_PER_SECOND,
-                (unsigned long)esp_get_free_heap_size(), (unsigned)coredump_size, elf_sha);
+                (unsigned long)esp_get_free_heap_size(), (unsigned)coredump_size, elf_sha, failed);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");

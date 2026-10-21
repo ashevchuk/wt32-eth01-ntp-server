@@ -48,6 +48,9 @@ static esp_err_t clear_oscillator_stopped(void)
 
 esp_err_t rtc_read(struct tm *utc)
 {
+    if (!rtc_dev) {
+        return ESP_ERR_NOT_FOUND;
+    }
     uint8_t status;
     ESP_RETURN_ON_ERROR(read_registers(REG_STATUS, &status, 1), TAG, "read status");
 
@@ -68,6 +71,9 @@ esp_err_t rtc_read(struct tm *utc)
 
 esp_err_t rtc_write(const struct tm *utc)
 {
+    if (!rtc_dev) {
+        return ESP_ERR_NOT_FOUND;
+    }
     const uint8_t buffer[1 + TIME_REGISTER_COUNT] = {
         REG_TIME,
         bin_to_bcd(utc->tm_sec),
