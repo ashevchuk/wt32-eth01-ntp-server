@@ -1,6 +1,7 @@
 #include "gnss.h"
 
 #include <stdbool.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,7 +42,18 @@
 #define GGA_FIELD_ALTITUDE 9
 #define GSA_FIELD_FIX_MODE 2
 #define GSA_FIELD_PDOP 15
+#define GSA_FIRST_SATELLITE_FIELD 3
+#define GSA_SATELLITE_SLOTS 12
+#define GSV_FIELD_MESSAGE_COUNT 1
+#define GSV_FIELD_MESSAGE_INDEX 2
 #define GSV_FIELD_IN_VIEW 3
+#define GSV_FIELD_FIRST_SATELLITE 4
+#define GSV_FIELDS_PER_SATELLITE 4
+#define PPS_WINDOW 60
+#define PPS_NOMINAL_PERIOD_US 1000000
+// A larger deviation is a missed pulse or a restart, not jitter.
+#define PPS_MAX_PERIOD_ERROR_US 10000
+#define PPS_PRESENT_TIMEOUT_US 2500000
 #define DEGREE_MINUTES_DIVISOR 100.0
 #define MINUTES_PER_DEGREE 60.0
 #define KNOTS_TO_KMH 1.852f
@@ -70,6 +82,17 @@ static gnss_status_t published_status;
 static uint8_t in_view_by_constellation[CONSTELLATION_COUNT];
 static portMUX_TYPE status_lock = portMUX_INITIALIZER_UNLOCKED;
 
+static gnss_satellite_t working_satellites[GNSS_MAX_SATELLITES];
+static size_t working_satellite_count;
+static gnss_satellite_t published_satellites[GNSS_MAX_SATELLITES];
+static size_t published_satellite_count;
+static int64_t satellites_updated_us;
+// One bit per satellite number, filled from the GSA sentences that follow each RMC.
+static uint8_t used_satellites[32];
+
+static gnss_pps_t pps_stats;
+static int64_t last_pps_us;
+
 static QueueHandle_t pps_queue;
 static QueueHandle_t rmc_queue;
 static gnss_second_cb_t second_callback;
@@ -84,14 +107,54 @@ static void IRAM_ATTR on_pps(void *arg)
     }
 }
 
+static void record_pps_period(int64_t period_us)
+{
+    static int32_t errors[PPS_WINDOW];
+    static size_t filled, next;
+
+    const int64_t error_us = period_us - PPS_NOMINAL_PERIOD_US;
+    if (llabs(error_us) > PPS_MAX_PERIOD_ERROR_US) {
+        return;
+    }
+    errors[next] = (int32_t)error_us;
+    next = (next + 1) % PPS_WINDOW;
+    if (filled < PPS_WINDOW) {
+        filled++;
+    }
+
+    double sum = 0, sum_squares = 0;
+    int32_t min_us = errors[0], max_us = errors[0];
+    for (size_t i = 0; i < filled; i++) {
+        sum += errors[i];
+        sum_squares += (double)errors[i] * errors[i];
+        min_us = errors[i] < min_us ? errors[i] : min_us;
+        max_us = errors[i] > max_us ? errors[i] : max_us;
+    }
+    const double mean = sum / filled;
+    const double variance = sum_squares / filled - mean * mean;
+
+    portENTER_CRITICAL(&status_lock);
+    pps_stats.samples = (uint8_t)filled;
+    pps_stats.offset_ppm = (float)mean;
+    pps_stats.jitter_us = variance > 0 ? (float)sqrt(variance) : 0;
+    pps_stats.min_error_us = min_us;
+    pps_stats.max_error_us = max_us;
+    portEXIT_CRITICAL(&status_lock);
+}
+
 static void pps_task(void *arg)
 {
     int64_t previous_us = 0;
     int64_t timestamp_us;
     while (xQueueReceive(pps_queue, &timestamp_us, portMAX_DELAY)) {
         struct rmc_sample sample;
+        portENTER_CRITICAL(&status_lock);
+        pps_stats.pulses++;
+        last_pps_us = timestamp_us;
+        portEXIT_CRITICAL(&status_lock);
         if (previous_us) {
             ESP_LOGI(TAG, "pps period %lld us", (long long)(timestamp_us - previous_us));
+            record_pps_period(timestamp_us - previous_us);
         }
         // The RMC sentence describes the second that began at the previous pulse, so this pulse starts the next one.
         bool fresh = previous_us && xQueueReceive(rmc_queue, &sample, 0) == pdTRUE
@@ -173,6 +236,7 @@ static void handle_rmc(char *fields[], int count)
     const bool valid = fields[RMC_FIELD_STATUS][0] == 'A';
     ESP_LOGI(TAG, "rmc fix=%s time=%s date=%s", valid ? "yes" : "no",
              fields[RMC_FIELD_TIME], fields[RMC_FIELD_DATE]);
+    memset(used_satellites, 0, sizeof(used_satellites));
 
     working_status.fix = valid;
     working_status.updated_us = esp_timer_get_time();
@@ -211,6 +275,58 @@ static void handle_gsa(char *fields[], int count)
     }
     working_status.fix_mode = (uint8_t)strtoul(fields[GSA_FIELD_FIX_MODE], NULL, 10);
     working_status.pdop = strtof(fields[GSA_FIELD_PDOP], NULL);
+    for (int i = GSA_FIRST_SATELLITE_FIELD; i < GSA_FIRST_SATELLITE_FIELD + GSA_SATELLITE_SLOTS; i++) {
+        const unsigned long id = strtoul(fields[i], NULL, 10);
+        if (has_value(fields[i]) && id < sizeof(used_satellites) * 8) {
+            used_satellites[id / 8] |= 1 << (id % 8);
+        }
+    }
+}
+
+static bool satellite_used(uint8_t id)
+{
+    return id != 0 && (used_satellites[id / 8] & (1 << (id % 8)));
+}
+
+static int16_t optional_number(const char *field)
+{
+    return has_value(field) ? (int16_t)strtol(field, NULL, 10) : GNSS_UNKNOWN;
+}
+
+// A GSV cycle is one sentence per page of four satellites and talker; the talker's list is replaced when its
+// first page arrives and published when the last one has.
+static void collect_satellites(const char *talker, char *fields[], int count)
+{
+    const unsigned long message_count = strtoul(fields[GSV_FIELD_MESSAGE_COUNT], NULL, 10);
+    const unsigned long message_index = strtoul(fields[GSV_FIELD_MESSAGE_INDEX], NULL, 10);
+    if (message_index == 1) {
+        size_t kept = 0;
+        for (size_t i = 0; i < working_satellite_count; i++) {
+            if (strncmp(working_satellites[i].talker, talker, TALKER_LENGTH) != 0) {
+                working_satellites[kept++] = working_satellites[i];
+            }
+        }
+        working_satellite_count = kept;
+    }
+    for (int i = GSV_FIELD_FIRST_SATELLITE; i + GSV_FIELDS_PER_SATELLITE <= count
+                                            && working_satellite_count < GNSS_MAX_SATELLITES;
+         i += GSV_FIELDS_PER_SATELLITE) {
+        gnss_satellite_t *satellite = &working_satellites[working_satellite_count++];
+        memcpy(satellite->talker, talker, TALKER_LENGTH);
+        satellite->talker[TALKER_LENGTH] = '\0';
+        satellite->id = (uint8_t)strtoul(fields[i], NULL, 10);
+        satellite->elevation_deg = optional_number(fields[i + 1]);
+        satellite->azimuth_deg = optional_number(fields[i + 2]);
+        satellite->snr_dbhz = optional_number(fields[i + 3]);
+        satellite->used = satellite_used(satellite->id);
+    }
+    if (message_index == message_count) {
+        portENTER_CRITICAL(&status_lock);
+        memcpy(published_satellites, working_satellites, sizeof(working_satellites));
+        published_satellite_count = working_satellite_count;
+        satellites_updated_us = esp_timer_get_time();
+        portEXIT_CRITICAL(&status_lock);
+    }
 }
 
 static void handle_gsv(const char *talker, char *fields[], int count)
@@ -226,6 +342,7 @@ static void handle_gsv(const char *talker, char *fields[], int count)
         total += in_view_by_constellation[i];
     }
     working_status.satellites_in_view = (uint8_t)total;
+    collect_satellites(talker, fields, count);
 }
 
 static void handle_nmea_line(char *line)
@@ -263,6 +380,24 @@ void gnss_get_status(gnss_status_t *status)
 {
     portENTER_CRITICAL(&status_lock);
     *status = published_status;
+    portEXIT_CRITICAL(&status_lock);
+}
+
+size_t gnss_get_satellites(gnss_satellite_t satellites[GNSS_MAX_SATELLITES], int64_t *age_us)
+{
+    portENTER_CRITICAL(&status_lock);
+    const size_t count = published_satellite_count;
+    memcpy(satellites, published_satellites, count * sizeof(gnss_satellite_t));
+    *age_us = satellites_updated_us ? esp_timer_get_time() - satellites_updated_us : INT64_MAX;
+    portEXIT_CRITICAL(&status_lock);
+    return count;
+}
+
+void gnss_get_pps(gnss_pps_t *pps)
+{
+    portENTER_CRITICAL(&status_lock);
+    *pps = pps_stats;
+    pps->present = last_pps_us && esp_timer_get_time() - last_pps_us < PPS_PRESENT_TIMEOUT_US;
     portEXIT_CRITICAL(&status_lock);
 }
 

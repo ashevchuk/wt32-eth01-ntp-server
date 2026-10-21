@@ -43,6 +43,9 @@
 #define MAC_TEXT_LENGTH 18
 #define HTTP_STACK_SIZE 8192
 #define HTTP_MAX_URI_HANDLERS 16
+#define SATELLITES_CHUNK_SIZE 768
+#define SATELLITE_ENTRY_SIZE 112
+#define NUMBER_TEXT_SIZE 8
 // The lwIP socket pool is shared with the HTTP listener and control socket, NTP, Munin and the SNTP client.
 #define HTTP_MAX_OPEN_SOCKETS 8
 #define HTTP_STATUS_CONFLICT "409 Conflict"
@@ -158,9 +161,16 @@ static void write_gnss(struct json_out *out)
 
     leap_status_t leap;
     leap_get(&leap);
-    json_printf(out, "\"leap\":{\"known\":%s,\"gps_utc_offset_s\":%d,\"change\":%d,\"seconds_to_event\":%lld}}",
+    json_printf(out, "\"leap\":{\"known\":%s,\"gps_utc_offset_s\":%d,\"change\":%d,\"seconds_to_event\":%lld},",
                 leap.known ? "true" : "false", leap.gps_utc_offset_s, leap.event_known ? leap.change : 0,
                 (long long)(leap.event_known ? leap.seconds_to_event : 0));
+
+    gnss_pps_t pps;
+    gnss_get_pps(&pps);
+    json_printf(out, "\"pps\":{\"present\":%s,\"pulses\":%lu,\"samples\":%u,\"offset_ppm\":%.2f,\"jitter_us\":%.2f,"
+                     "\"min_us\":%ld,\"max_us\":%ld}}",
+                pps.present ? "true" : "false", (unsigned long)pps.pulses, pps.samples, pps.offset_ppm, pps.jitter_us,
+                (long)pps.min_error_us, (long)pps.max_error_us);
 }
 
 static void json_string(struct json_out *out, const char *text)
@@ -536,6 +546,53 @@ static esp_err_t munin_post_handler(httpd_req_t *req)
     }
 }
 
+static void number_or_null(char text[NUMBER_TEXT_SIZE], int value)
+{
+    if (value == GNSS_UNKNOWN) {
+        strcpy(text, "null");
+    } else {
+        snprintf(text, NUMBER_TEXT_SIZE, "%d", value);
+    }
+}
+
+// Up to 64 satellites do not fit the status buffer, so the reply goes out in chunks.
+static esp_err_t satellites_handler(httpd_req_t *req)
+{
+    gnss_satellite_t satellites[GNSS_MAX_SATELLITES];
+    int64_t age_us;
+    const size_t count = gnss_get_satellites(satellites, &age_us);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    char chunk[SATELLITES_CHUNK_SIZE];
+    int length = snprintf(chunk, sizeof(chunk), "{\"age_s\":%lld,\"satellites\":[",
+                          (long long)(age_us == INT64_MAX ? -1 : age_us / MICROS_PER_SECOND));
+    for (size_t i = 0; i < count; i++) {
+        char elevation[NUMBER_TEXT_SIZE], azimuth[NUMBER_TEXT_SIZE], snr[NUMBER_TEXT_SIZE];
+        number_or_null(elevation, satellites[i].elevation_deg);
+        number_or_null(azimuth, satellites[i].azimuth_deg);
+        number_or_null(snr, satellites[i].snr_dbhz);
+        char entry[SATELLITE_ENTRY_SIZE];
+        const int entry_length = snprintf(entry, sizeof(entry),
+                                          "%s{\"talker\":\"%s\",\"id\":%u,\"elevation\":%s,\"azimuth\":%s,\"snr\":%s,\"used\":%s}",
+                                          i ? "," : "", satellites[i].talker, satellites[i].id, elevation, azimuth, snr,
+                                          satellites[i].used ? "true" : "false");
+        if (length + entry_length >= (int)sizeof(chunk)) {
+            ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(req, chunk, length), TAG, "send");
+            length = 0;
+        }
+        memcpy(chunk + length, entry, entry_length);
+        length += entry_length;
+    }
+    if (length + 2 >= (int)sizeof(chunk)) {
+        ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(req, chunk, length), TAG, "send");
+        length = 0;
+    }
+    length += snprintf(chunk + length, sizeof(chunk) - length, "]}");
+    ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(req, chunk, length), TAG, "send");
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 static esp_err_t gnss_config_get_handler(httpd_req_t *req)
 {
     gnss_receiver_t receiver;
@@ -630,6 +687,7 @@ esp_err_t web_start(void)
         {.uri = "/api/sensors", .method = HTTP_GET, .handler = sensors_get_handler},
         {.uri = "/api/sensors", .method = HTTP_POST, .handler = sensors_post_handler},
         {.uri = "/api/gnss/config", .method = HTTP_GET, .handler = gnss_config_get_handler},
+        {.uri = "/api/gnss/satellites", .method = HTTP_GET, .handler = satellites_handler},
         {.uri = "/api/gnss/config", .method = HTTP_POST, .handler = gnss_config_post_handler},
         {.uri = "/api/upstream", .method = HTTP_POST, .handler = upstream_post_handler},
         {.uri = "/api/munin", .method = HTTP_GET, .handler = munin_get_handler},
