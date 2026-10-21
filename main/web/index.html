@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NTP server</title>
+<style>
+:root {
+  --bg: #f4f5f7; --card: #ffffff; --text: #1c2330; --muted: #667085; --line: #e2e5ea;
+  --ok: #1a7f4b; --warn: #b26a00; --bad: #c0392b;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #11151c; --card: #1a2029; --text: #e6e9ee; --muted: #8b95a5; --line: #2a323e;
+          --ok: #4cc38a; --warn: #e5a244; --bad: #ee7b6e; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+       font: 15px/1.45 system-ui, sans-serif; }
+main { max-width: 1440px; margin: 0 auto; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+.sub { color: var(--muted); margin-bottom: 16px; }
+.clock { font: 600 40px/1.1 ui-monospace, monospace; letter-spacing: 1px; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+dt { color: var(--muted); white-space: nowrap; }
+dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+a { color: inherit; }
+form { display: grid; gap: 8px; }
+label { color: var(--muted); font-size: 13px; }
+input, select, button { font: inherit; color: var(--text); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%; }
+button { cursor: pointer; background: var(--text); color: var(--card); border: 0; }
+button.secondary { background: var(--bg); color: var(--text); border: 1px solid var(--line); }
+button:disabled, input:disabled { opacity: .5; cursor: not-allowed; }
+.result { min-height: 1.4em; font-size: 13px; }
+.sensor { display: grid; grid-template-columns: 1fr auto; gap: 6px 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+.sensor:first-child { border-top: 0; }
+.sensor .reading { font: 600 20px/1.2 ui-monospace, monospace; text-align: right; }
+.sensor .id { grid-column: 1 / -1; color: var(--muted); font-size: 12px; word-break: break-all; }
+.sensor button { width: auto; }
+progress { width: 100%; }
+</style>
+</head>
+<body>
+<main>
+  <h1>NTP server</h1>
+  <div class="sub" id="conn">connecting…</div>
+  <div class="grid">
+    <section class="card">
+      <h2>Time (UTC)</h2>
+      <div class="clock" id="utc">--:--:--</div>
+      <dl>
+        <dt>Date</dt><dd id="date">-</dd>
+        <dt>Local time</dt><dd id="local">-</dd>
+        <dt>Source</dt><dd id="source">-</dd>
+        <dt>Stratum</dt><dd id="stratum">-</dd>
+        <dt>RTC</dt><dd id="rtc">-</dd>
+        <dt>NTP requests</dt><dd id="requests">-</dd>
+      </dl>
+    </section>
+    <section class="card">
+      <h2>GNSS</h2>
+      <dl>
+        <dt>Fix</dt><dd id="fix">-</dd>
+        <dt>Satellites used / in view</dt><dd id="sats">-</dd>
+        <dt>HDOP / PDOP</dt><dd id="dop">-</dd>
+        <dt>Latitude</dt><dd id="lat">-</dd>
+        <dt>Longitude</dt><dd id="lon">-</dd>
+        <dt>Altitude</dt><dd id="alt">-</dd>
+        <dt>Speed / course</dt><dd id="motion">-</dd>
+        <dt>Leap second</dt><dd id="leap">-</dd>
+      </dl>
+    </section>
+    <section class="card">
+      <h2>Fallback NTP server</h2>
+      <dl>
+        <dt>State</dt><dd id="up-state">-</dd>
+        <dt>Upstream stratum</dt><dd id="up-stratum">-</dd>
+        <dt>Last sync</dt><dd id="up-age">-</dd>
+        <dt>Round trip</dt><dd id="up-delay">-</dd>
+        <dt>GNSS minus upstream</dt><dd id="up-offset">-</dd>
+      </dl>
+      <form id="up-form">
+        <label for="up-server">Server (empty disables the fallback)</label>
+        <input id="up-server" maxlength="63" spellcheck="false" autocomplete="off">
+        <button type="submit">Save server</button>
+        <div class="result" id="up-result">Used when GNSS time is not available. The offset is only known while GNSS is the source and is limited by internet jitter.</div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>GNSS receiver</h2>
+      <dl>
+        <dt>Dynamic model</dt><dd id="rx-model">-</dd>
+        <dt>Saved in receiver memory</dt><dd id="rx-saved">-</dd>
+      </dl>
+      <form id="rx-form">
+        <label for="rx-cable">Antenna cable delay, ns (about 5 ns per metre)</label>
+        <input id="rx-cable" type="number" min="0" max="32767" step="1" required>
+        <label for="rx-user">Additional PPS delay, ns</label>
+        <input id="rx-user" type="number" min="-1000000" max="1000000" step="1" required>
+        <button type="submit">Apply and save in receiver</button>
+        <div class="result" id="rx-result">The receiver is written only when a value changed.</div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>Ethernet</h2>
+      <dl>
+        <dt>Mode</dt><dd id="eth-mode">-</dd>
+        <dt>Address</dt><dd id="ip">-</dd>
+        <dt>Netmask</dt><dd id="mask">-</dd>
+        <dt>Gateway</dt><dd id="gw">-</dd>
+        <dt>DNS</dt><dd id="dns">-</dd>
+        <dt>MAC</dt><dd id="mac">-</dd>
+        <dt>Link</dt><dd id="eth-link">-</dd>
+        <dt>PHY symbol errors</dt><dd id="eth-symbol">-</dd>
+        <dt>EMAC missed / overflow</dt><dd id="eth-missed">-</dd>
+      </dl>
+    </section>
+    <section class="card">
+      <h2>Wi-Fi</h2>
+      <dl>
+        <dt>State</dt><dd id="wifi-state">-</dd>
+        <dt>Address</dt><dd id="wifi-ip">-</dd>
+        <dt>Signal</dt><dd id="wifi-rssi">-</dd>
+        <dt>Hostname</dt><dd id="hostname">-</dd>
+      </dl>
+    </section>
+    <section class="card">
+      <h2>Network settings</h2>
+      <form id="net-form">
+        <label for="net-hostname">Hostname</label>
+        <input id="net-hostname" maxlength="31" spellcheck="false" autocomplete="off">
+        <label for="net-mode">Ethernet</label>
+        <select id="net-mode"><option value="dhcp">DHCP</option><option value="static">Static</option></select>
+        <input id="net-ip" placeholder="IP address" autocomplete="off">
+        <input id="net-mask" placeholder="Netmask" autocomplete="off">
+        <input id="net-gw" placeholder="Gateway (optional)" autocomplete="off">
+        <input id="net-dns" placeholder="DNS (optional)" autocomplete="off">
+        <label for="wifi-enabled">Wi-Fi</label>
+        <select id="wifi-enabled"><option value="0">Disabled</option><option value="1">Enabled (client)</option></select>
+        <input id="wifi-ssid" placeholder="SSID" maxlength="32" autocomplete="off">
+        <input id="wifi-password" type="password" placeholder="Password (empty keeps the stored one)" maxlength="63" autocomplete="new-password">
+        <button type="submit">Save network settings</button>
+        <button type="button" class="secondary" id="reboot">Restart device</button>
+        <div class="result" id="net-result">Changes apply after a restart.</div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>Timezone</h2>
+      <form id="tz-form">
+        <label for="tz-preset">Zone</label>
+        <select id="tz-preset"></select>
+        <label for="tz-custom">POSIX TZ string</label>
+        <input id="tz-custom" maxlength="63" spellcheck="false" autocomplete="off">
+        <button type="submit">Save timezone</button>
+        <div class="result" id="tz-result"></div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>Set time manually (UTC)</h2>
+      <form id="time-form">
+        <label for="time-value">Date and time</label>
+        <input id="time-value" type="datetime-local" step="1" required>
+        <button type="button" class="secondary" id="time-browser">Use this computer's time</button>
+        <button type="submit" id="time-submit">Set time</button>
+        <div class="result" id="time-result">Accepted only while neither GNSS nor network time is available.</div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>Temperature sensors (DS18B20)</h2>
+      <div id="sensors"><span class="sub">No sensors found yet.</span></div>
+      <form id="plugin-form">
+        <label for="plugin-name">Munin plugin name</label>
+        <input id="plugin-name" maxlength="31" spellcheck="false" autocomplete="off">
+        <button type="submit">Save plugin name</button>
+      </form>
+      <div class="result" id="sensor-result">The name is the Munin field name: letters, digits, underscore. Leave empty to restore the default.</div>
+    </section>
+    <section class="card">
+      <h2>Firmware update</h2>
+      <form id="ota-form">
+        <label for="ota-file">Firmware image (ntp.bin)</label>
+        <input id="ota-file" type="file" accept=".bin" required>
+        <progress id="ota-progress" value="0" max="100" hidden></progress>
+        <button type="submit" id="ota-submit">Upload and install</button>
+        <div class="result" id="ota-result">The device restarts after a successful upload. A new image that fails to start is rolled back automatically.</div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>System</h2>
+      <dl>
+        <dt>Firmware</dt><dd id="fw">-</dd>
+        <dt>Running slot</dt><dd id="slot">-</dd>
+        <dt>ESP-IDF</dt><dd id="idf">-</dd>
+        <dt>Uptime</dt><dd id="uptime">-</dd>
+        <dt>Last reset</dt><dd id="reset">-</dd>
+        <dt>Free heap</dt><dd id="heap">-</dd>
+      </dl>
+    </section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const FIX_MODES = { 1: "no fix", 2: "2D", 3: "3D" };
+const TIMEZONES = [
+  ["UTC", "UTC0"],
+  ["Kyiv", "EET-2EEST,M3.5.0/3,M10.5.0/4"],
+  ["Warsaw, Berlin", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["London", "GMT0BST,M3.5.0/1,M10.5.0"],
+  ["Moscow", "MSK-3"],
+  ["New York", "EST5EDT,M3.2.0,M11.1.0"],
+  ["Chicago", "CST6CDT,M3.2.0,M11.1.0"],
+  ["Los Angeles", "PST8PDT,M3.2.0,M11.1.0"],
+  ["Tokyo", "JST-9"],
+  ["Sydney", "AEST-10AEDT,M10.1.0,M4.1.0/3"],
+];
+const CUSTOM = "custom";
+const SOURCE_CLASS = { gnss: "ok", network: "warn", local: "warn", unsynchronized: "bad" };
+
+function set(id, text, cls) {
+  const el = $(id);
+  el.textContent = text;
+  el.className = cls || "";
+}
+
+function duration(seconds) {
+  const d = Math.floor(seconds / 86400), h = Math.floor(seconds % 86400 / 3600),
+        m = Math.floor(seconds % 3600 / 60), s = seconds % 60;
+  return (d ? d + "d " : "") + [h, m, s].map(v => String(v).padStart(2, "0")).join(":");
+}
+
+function render(s) {
+  const t = s.time;
+  set("utc", t.utc ? t.utc.slice(11, 19) : "--:--:--");
+  set("date", t.utc ? t.utc.slice(0, 10) : "-");
+  set("local", t.local ? t.local.replace("T", " ") : "-");
+  $("time-submit").disabled = t.source === "gnss" || t.source === "network";
+  initTimezone(t.timezone);
+  renderUpstream(t.upstream);
+  set("source", t.source, SOURCE_CLASS[t.source]);
+  set("stratum", t.stratum);
+  set("rtc", t.rtc_valid ? t.rtc : "invalid", t.rtc_valid ? "" : "warn");
+  set("requests", s.ntp.requests);
+
+  const g = s.gnss;
+  set("fix", g.fix ? (FIX_MODES[g.fix_mode] || "yes") : "no", g.fix ? "ok" : "bad");
+  set("sats", g.satellites_used + " / " + g.satellites_in_view);
+  set("dop", g.hdop.toFixed(2) + " / " + g.pdop.toFixed(2));
+  if (g.has_position) {
+    $("lat").textContent = g.latitude.toFixed(6) + "°";
+    $("lon").textContent = g.longitude.toFixed(6) + "°";
+    const a = document.createElement("a");
+    a.href = "https://www.openstreetmap.org/?mlat=" + g.latitude + "&mlon=" + g.longitude + "&zoom=16";
+    a.target = "_blank"; a.rel = "noopener";
+    a.textContent = g.altitude.toFixed(1) + " m";
+    $("alt").replaceChildren(a);
+  } else {
+    set("lat", "-"); set("lon", "-"); set("alt", "-");
+  }
+  set("motion", g.speed.toFixed(1) + " km/h / " + g.course.toFixed(0) + "°");
+  const l = g.leap;
+  if (!l.known) {
+    set("leap", "unknown");
+  } else if (!l.change) {
+    set("leap", "none scheduled, GPS-UTC " + l.gps_utc_offset_s + " s");
+  } else {
+    set("leap", (l.change > 0 ? "insert" : "delete") + " in " + (l.seconds_to_event / 86400).toFixed(1) + " days", "warn");
+  }
+
+  const e = s.network.eth;
+  set("eth-mode", e.mode === "static" ? "static" : "DHCP");
+  set("ip", e.ip); set("mask", e.mask); set("gw", e.gw); set("dns", e.dns); set("mac", e.mac);
+  set("eth-link", e.speed ? e.speed + " Mbit/s, " + (e.full_duplex ? "full" : "half") + " duplex" : "down",
+      e.speed ? "" : "bad");
+  set("eth-symbol", e.symbol_errors, e.symbol_errors ? "warn" : "");
+  set("eth-missed", e.rx_missed + " / " + e.rx_fifo_overflow, e.rx_missed + e.rx_fifo_overflow ? "warn" : "");
+  const w = s.network.wifi;
+  set("wifi-state", w.enabled ? (w.connected ? "connected" : "connecting…") : "disabled",
+      w.connected ? "ok" : (w.enabled ? "warn" : ""));
+  set("wifi-ip", w.ip);
+  set("wifi-rssi", w.connected ? w.rssi + " dBm" : "-");
+  set("hostname", s.network.hostname);
+
+  set("fw", s.system.version);
+  set("idf", s.system.idf);
+  set("slot", s.system.partition);
+  set("uptime", duration(s.system.uptime_s));
+  set("reset", s.system.reset_reason, ["power-on", "software", "external pin"].includes(s.system.reset_reason) ? "" : "bad");
+  set("heap", (s.system.free_heap / 1024).toFixed(0) + " KiB");
+}
+
+let upstreamReady = false;
+function renderUpstream(u) {
+  if (!upstreamReady) {
+    upstreamReady = true;
+    $("up-server").value = u.server;
+  }
+  set("up-state", u.enabled ? (u.synced ? "synchronized" : "waiting for a reply") : "disabled",
+      u.synced ? "ok" : (u.enabled ? "warn" : ""));
+  set("up-stratum", u.synced ? u.stratum : "-");
+  set("up-age", u.synced ? duration(u.age_s) + " ago" : "-");
+  set("up-delay", u.synced ? u.delay_ms.toFixed(1) + " ms" : "-");
+  set("up-offset", u.offset_ms === null ? "-" : u.offset_ms.toFixed(1) + " ms");
+}
+
+$("up-form").addEventListener("submit", e => {
+  e.preventDefault();
+  post("/api/upstream", { server: $("up-server").value.trim() }, "up-result");
+});
+
+let timezoneReady = false;
+function initTimezone(current) {
+  if (timezoneReady) return;
+  timezoneReady = true;
+  const preset = $("tz-preset");
+  for (const [label, value] of TIMEZONES) preset.add(new Option(label, value));
+  preset.add(new Option("Custom…", CUSTOM));
+  const known = TIMEZONES.some(([, value]) => value === current);
+  preset.value = known ? current : CUSTOM;
+  $("tz-custom").value = current;
+}
+
+async function post(url, params, resultId) {
+  const out = $(resultId);
+  try {
+    const r = await fetch(url, { method: "POST", body: new URLSearchParams(params) });
+    const body = await r.json();
+    out.textContent = body.message;
+    out.className = "result " + (body.ok ? "ok" : "bad");
+  } catch (e) {
+    out.textContent = "request failed";
+    out.className = "result bad";
+  }
+}
+
+$("tz-preset").addEventListener("change", e => {
+  if (e.target.value !== CUSTOM) $("tz-custom").value = e.target.value;
+});
+$("tz-form").addEventListener("submit", e => {
+  e.preventDefault();
+  post("/api/timezone", { timezone: $("tz-custom").value.trim() }, "tz-result");
+});
+$("time-browser").addEventListener("click", () => {
+  $("time-value").value = new Date().toISOString().slice(0, 19);
+});
+$("time-form").addEventListener("submit", e => {
+  e.preventDefault();
+  post("/api/time", { utc: $("time-value").value + "Z" }, "time-result");
+});
+
+function syncNetworkFields() {
+  const isStatic = $("net-mode").value === "static";
+  for (const id of ["net-ip", "net-mask", "net-gw", "net-dns"]) $(id).disabled = !isStatic;
+  const wifiOn = $("wifi-enabled").value === "1";
+  for (const id of ["wifi-ssid", "wifi-password"]) $(id).disabled = !wifiOn;
+}
+
+async function loadNetwork() {
+  const n = await (await fetch("/api/network", { cache: "no-store" })).json();
+  $("net-hostname").value = n.hostname;
+  $("net-mode").value = n.eth_static ? "static" : "dhcp";
+  $("net-ip").value = n.eth_ip;
+  $("net-mask").value = n.eth_mask;
+  $("net-gw").value = n.eth_gateway;
+  $("net-dns").value = n.eth_dns;
+  $("wifi-enabled").value = n.wifi_enabled ? "1" : "0";
+  $("wifi-ssid").value = n.wifi_ssid;
+  syncNetworkFields();
+}
+
+$("net-mode").addEventListener("change", syncNetworkFields);
+$("wifi-enabled").addEventListener("change", syncNetworkFields);
+$("net-form").addEventListener("submit", e => {
+  e.preventDefault();
+  post("/api/network", {
+    hostname: $("net-hostname").value.trim(),
+    eth_mode: $("net-mode").value,
+    eth_ip: $("net-ip").value.trim(),
+    eth_mask: $("net-mask").value.trim(),
+    eth_gateway: $("net-gw").value.trim(),
+    eth_dns: $("net-dns").value.trim(),
+    wifi_enabled: $("wifi-enabled").value,
+    wifi_ssid: $("wifi-ssid").value,
+    wifi_password: $("wifi-password").value,
+  }, "net-result");
+});
+$("reboot").addEventListener("click", async () => {
+  if (!confirm("Restart the device now?")) return;
+  await post("/api/reboot", {}, "net-result");
+});
+
+function uploadFirmware(file) {
+  const result = $("ota-result"), bar = $("ota-progress");
+  const fail = text => {
+    result.textContent = text;
+    result.className = "result bad";
+    $("ota-submit").disabled = false;
+  };
+  $("ota-submit").disabled = true;
+  bar.hidden = false;
+  bar.value = 0;
+  result.textContent = "Uploading…";
+  result.className = "result";
+
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/ota");
+  xhr.setRequestHeader("Content-Type", "application/octet-stream");
+  xhr.upload.onprogress = e => { if (e.lengthComputable) bar.value = 100 * e.loaded / e.total; };
+  xhr.onerror = () => fail("Upload failed");
+  xhr.onload = () => {
+    let message = xhr.responseText;
+    try { message = JSON.parse(xhr.responseText).message; } catch (e) {}
+    if (xhr.status !== 200) return fail(message);
+    result.textContent = message + " Waiting for the device…";
+    result.className = "result ok";
+    waitForRestart();
+  };
+  xhr.send(file);
+}
+
+async function waitForRestart() {
+  await new Promise(r => setTimeout(r, 5000));
+  for (let i = 0; i < 60; i++) {
+    try {
+      const r = await fetch("/api/status", { cache: "no-store" });
+      if (r.ok && (await r.json()).system.uptime_s < 120) return location.reload();
+    } catch (e) {}
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  $("ota-result").textContent = "The device did not come back. Check it manually.";
+  $("ota-result").className = "result bad";
+}
+
+$("ota-form").addEventListener("submit", e => {
+  e.preventDefault();
+  uploadFirmware($("ota-file").files[0]);
+});
+
+$("plugin-form").addEventListener("submit", e => {
+  e.preventDefault();
+  post("/api/munin", { plugin: $("plugin-name").value.trim() }, "sensor-result");
+});
+
+async function loadPlugin() {
+  $("plugin-name").value = (await (await fetch("/api/munin", { cache: "no-store" })).json()).plugin;
+}
+
+const DYNAMIC_MODELS = { 0: "portable", 2: "stationary", 3: "pedestrian", 4: "automotive", 5: "sea", 6: "airborne" };
+
+async function loadReceiver() {
+  const r = await (await fetch("/api/gnss/config", { cache: "no-store" })).json();
+  if (!r.known) {
+    set("rx-model", "no answer from receiver", "warn");
+    set("rx-saved", "-");
+    return;
+  }
+  set("rx-model", DYNAMIC_MODELS[r.dynamic_model] || String(r.dynamic_model),
+      r.dynamic_model === 2 ? "ok" : "warn");
+  set("rx-saved", r.saved ? "yes" : "unchanged since boot");
+  $("rx-cable").value = r.cable_delay_ns;
+  $("rx-user").value = r.user_delay_ns;
+}
+
+$("rx-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  await post("/api/gnss/config", { cable_delay_ns: $("rx-cable").value, user_delay_ns: $("rx-user").value }, "rx-result");
+  loadReceiver().catch(() => {});
+});
+
+const sensorRows = new Map();
+
+function buildSensorRow(sensor) {
+  const row = document.createElement("form");
+  row.className = "sensor";
+  const input = document.createElement("input");
+  input.value = sensor.name;
+  input.maxLength = 31;
+  input.spellcheck = false;
+  input.autocomplete = "off";
+  const reading = document.createElement("div");
+  reading.className = "reading";
+  const save = document.createElement("button");
+  save.textContent = "Save name";
+  const id = document.createElement("div");
+  id.className = "id";
+  id.textContent = sensor.id;
+  row.append(input, reading, save, id);
+  row.addEventListener("submit", e => {
+    e.preventDefault();
+    post("/api/sensors", { id: sensor.id, name: input.value.trim() }, "sensor-result");
+  });
+  return { row, input, reading };
+}
+
+function renderSensors(sensors) {
+  const container = $("sensors");
+  if (sensors.length === 0) return;
+  if (sensorRows.size === 0) container.replaceChildren();
+  for (const sensor of sensors) {
+    let entry = sensorRows.get(sensor.id);
+    if (!entry) {
+      entry = buildSensorRow(sensor);
+      sensorRows.set(sensor.id, entry);
+      container.append(entry.row);
+    }
+    if (document.activeElement !== entry.input && entry.input.value !== sensor.name &&
+        !entry.input.dataset.edited) {
+      entry.input.value = sensor.name;
+    }
+    entry.reading.textContent = sensor.temperature === null ? "no data" : sensor.temperature.toFixed(2) + " °C";
+    entry.reading.className = "reading" + (sensor.temperature === null ? " bad" : "");
+  }
+}
+
+async function tick() {
+  try {
+    const r = await fetch("/api/status", { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    render(await r.json());
+    renderSensors(await (await fetch("/api/sensors", { cache: "no-store" })).json());
+    set("conn", "live");
+  } catch (e) {
+    set("conn", "offline", "bad");
+  }
+}
+loadNetwork().catch(() => {});
+loadReceiver().catch(() => {});
+loadPlugin().catch(() => {});
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>
