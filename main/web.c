@@ -42,7 +42,8 @@
 #define IP_TEXT_LENGTH 16
 #define MAC_TEXT_LENGTH 18
 #define HTTP_STACK_SIZE 8192
-#define HTTP_MAX_URI_HANDLERS 16
+#define HTTP_MAX_URI_HANDLERS 20
+#define RESETS_BODY_SIZE 1024
 #define SATELLITES_CHUNK_SIZE 768
 #define SATELLITE_ENTRY_SIZE 112
 #define NUMBER_TEXT_SIZE 8
@@ -230,9 +231,9 @@ static void write_network(struct json_out *out)
                 wifi.enabled ? "true" : "false", wifi.connected ? "true" : "false", wifi.ip, wifi.rssi);
 }
 
-static const char *reset_reason_name(void)
+static const char *reset_reason_name(esp_reset_reason_t reason)
 {
-    switch (esp_reset_reason()) {
+    switch (reason) {
     case ESP_RST_POWERON:
         return "power-on";
     case ESP_RST_SW:
@@ -269,7 +270,7 @@ static esp_err_t status_handler(httpd_req_t *req)
     json_printf(&out, ",");
     write_network(&out);
     json_printf(&out, ",\"system\":{\"version\":\"%s\",\"idf\":\"%s\",\"partition\":\"%s\",\"reset_reason\":\"%s\",\"uptime_s\":%lld,\"free_heap\":%lu}}",
-                app->version, app->idf_ver, ota_running_partition_label(), reset_reason_name(), esp_timer_get_time() / MICROS_PER_SECOND,
+                app->version, app->idf_ver, ota_running_partition_label(), reset_reason_name(esp_reset_reason()), esp_timer_get_time() / MICROS_PER_SECOND,
                 (unsigned long)esp_get_free_heap_size());
 
     httpd_resp_set_type(req, "application/json");
@@ -471,6 +472,35 @@ static esp_err_t network_post_handler(httpd_req_t *req)
     return web_respond(req, HTTPD_200, "saved, restart to apply");
 }
 
+static esp_err_t resets_get_handler(httpd_req_t *req)
+{
+    uint32_t counts[SETTINGS_RESET_REASONS];
+    if (settings_load_reset_counts(counts) != ESP_OK) {
+        return web_respond(req, HTTPD_500, "could not read the reset history");
+    }
+    char body[RESETS_BODY_SIZE];
+    int length = snprintf(body, sizeof(body), "[");
+    for (unsigned reason = 0; reason < SETTINGS_RESET_REASONS; reason++) {
+        if (counts[reason] != 0) {
+            length += snprintf(body + length, sizeof(body) - length, "%s{\"reason\":\"%s\",\"count\":%lu}",
+                               length > 1 ? "," : "", reset_reason_name((esp_reset_reason_t)reason),
+                               (unsigned long)counts[reason]);
+        }
+    }
+    snprintf(body + length, sizeof(body) - length, "]");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t resets_clear_handler(httpd_req_t *req)
+{
+    if (settings_clear_reset_counts() != ESP_OK) {
+        return web_respond(req, HTTPD_500, "could not clear the reset history");
+    }
+    return web_respond(req, HTTPD_200, "reset history cleared");
+}
+
 static esp_err_t reboot_handler(httpd_req_t *req)
 {
     web_respond(req, HTTPD_200, "restarting");
@@ -541,6 +571,8 @@ static esp_err_t munin_post_handler(httpd_req_t *req)
         return web_respond(req, HTTPD_200, "plugin name saved");
     case ESP_ERR_INVALID_ARG:
         return web_respond(req, HTTPD_400, "name must be letters, digits or underscore, not starting with a digit");
+    case ESP_ERR_INVALID_STATE:
+        return web_respond(req, HTTP_STATUS_CONFLICT, "name is used by a built-in GNSS plugin");
     default:
         return web_respond(req, HTTPD_500, "could not store the name");
     }
@@ -683,6 +715,8 @@ esp_err_t web_start(void)
         {.uri = "/api/network", .method = HTTP_GET, .handler = network_get_handler},
         {.uri = "/api/network", .method = HTTP_POST, .handler = network_post_handler},
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_handler},
+        {.uri = "/api/resets", .method = HTTP_GET, .handler = resets_get_handler},
+        {.uri = "/api/resets", .method = HTTP_POST, .handler = resets_clear_handler},
         {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_upload_handler},
         {.uri = "/api/sensors", .method = HTTP_GET, .handler = sensors_get_handler},
         {.uri = "/api/sensors", .method = HTTP_POST, .handler = sensors_post_handler},

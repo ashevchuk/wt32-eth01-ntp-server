@@ -2,6 +2,7 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 
 #include "bigclock.h"
@@ -53,6 +54,7 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "NTP server starting");
     ESP_ERROR_CHECK(settings_init());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(settings_record_reset(esp_reset_reason()));
 
     network_settings_t network;
     ESP_ERROR_CHECK(settings_load_network(&network));

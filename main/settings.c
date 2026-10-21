@@ -20,6 +20,7 @@
 #define KEY_MUNIN_PLUGIN "munin_plugin"
 #define KEY_PPS_DELAY "pps_delay"
 #define KEY_UPSTREAM "upstream"
+#define KEY_RESETS "resets"
 #define DEFAULT_UPSTREAM "pool.ntp.org"
 #define DEFAULT_MUNIN_PLUGIN "environment"
 #define DEFAULT_HOSTNAME "ntp-server"
@@ -289,6 +290,56 @@ esp_err_t settings_save_munin_plugin(const char *plugin)
     nvs_handle_t handle;
     ESP_RETURN_ON_ERROR(nvs_open(NAMESPACE, NVS_READWRITE, &handle), TAG, "open");
     esp_err_t err = nvs_set_str(handle, KEY_MUNIN_PLUGIN, plugin);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t settings_load_reset_counts(uint32_t counts[SETTINGS_RESET_REASONS])
+{
+    memset(counts, 0, sizeof(uint32_t) * SETTINGS_RESET_REASONS);
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NAMESPACE, NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(err, TAG, "open");
+    uint32_t stored[SETTINGS_RESET_REASONS];
+    size_t size = sizeof(stored);
+    err = nvs_get_blob(handle, KEY_RESETS, stored, &size);
+    nvs_close(handle);
+    if (err == ESP_OK && size == sizeof(stored)) {
+        memcpy(counts, stored, sizeof(stored));
+        return ESP_OK;
+    }
+    return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
+}
+
+esp_err_t settings_record_reset(unsigned reason)
+{
+    uint32_t counts[SETTINGS_RESET_REASONS];
+    ESP_RETURN_ON_ERROR(settings_load_reset_counts(counts), TAG, "load reset counts");
+    counts[reason < SETTINGS_RESET_REASONS ? reason : 0]++;
+    nvs_handle_t handle;
+    ESP_RETURN_ON_ERROR(nvs_open(NAMESPACE, NVS_READWRITE, &handle), TAG, "open");
+    esp_err_t err = nvs_set_blob(handle, KEY_RESETS, counts, sizeof(counts));
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t settings_clear_reset_counts(void)
+{
+    nvs_handle_t handle;
+    ESP_RETURN_ON_ERROR(nvs_open(NAMESPACE, NVS_READWRITE, &handle), TAG, "open");
+    esp_err_t err = nvs_erase_key(handle, KEY_RESETS);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    }
     if (err == ESP_OK) {
         err = nvs_commit(handle);
     }

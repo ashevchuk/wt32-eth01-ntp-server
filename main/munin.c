@@ -6,10 +6,12 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
 
+#include "gnss.h"
 #include "sensors.h"
 
 #define MUNIN_PORT 4949
@@ -20,11 +22,154 @@
 #define ETH_NETIF_KEY "ETH_DEF"
 #define NODE_VERSION "1.0"
 #define NO_VALUE "U"
+#define TASK_STACK_SIZE 6144
 
 static const char *TAG = "munin";
 
 static char plugin_name[SETTINGS_MUNIN_PLUGIN_MAX_LENGTH];
 static portMUX_TYPE plugin_lock = portMUX_INITIALIZER_UNLOCKED;
+
+// Readings older than this mean the receiver has stopped talking.
+#define GNSS_STALE_US 5000000
+#define NO_DOP_VALUE 99.0f
+#define LIST_SIZE 192
+#define FETCH_SIZE 256
+
+struct builtin_plugin {
+    const char *name;
+    const char *config;
+    int (*fetch)(char *out, size_t size);
+};
+
+static bool gnss_fresh(const gnss_status_t *status)
+{
+    return status->updated_us && esp_timer_get_time() - status->updated_us < GNSS_STALE_US;
+}
+
+static int fetch_satellites(char *out, size_t size)
+{
+    gnss_status_t status;
+    gnss_get_status(&status);
+    if (!gnss_fresh(&status)) {
+        return snprintf(out, size, "in_view.value " NO_VALUE "\nused.value " NO_VALUE "\ntracked.value " NO_VALUE "\n");
+    }
+    gnss_satellite_t satellites[GNSS_MAX_SATELLITES];
+    int64_t age_us;
+    const size_t count = gnss_get_satellites(satellites, &age_us);
+    int tracked = 0;
+    for (size_t i = 0; i < count; i++) {
+        tracked += satellites[i].snr_dbhz != GNSS_UNKNOWN;
+    }
+    return snprintf(out, size, "in_view.value %u\nused.value %u\ntracked.value %d\n", status.satellites_in_view,
+                    status.satellites_used, tracked);
+}
+
+static int fetch_signal(char *out, size_t size)
+{
+    gnss_status_t status;
+    gnss_get_status(&status);
+    gnss_satellite_t satellites[GNSS_MAX_SATELLITES];
+    int64_t age_us;
+    const size_t count = gnss_get_satellites(satellites, &age_us);
+    int tracked = 0, sum = 0, strongest = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (satellites[i].snr_dbhz != GNSS_UNKNOWN) {
+            tracked++;
+            sum += satellites[i].snr_dbhz;
+            strongest = satellites[i].snr_dbhz > strongest ? satellites[i].snr_dbhz : strongest;
+        }
+    }
+    if (!gnss_fresh(&status) || tracked == 0) {
+        return snprintf(out, size, "mean.value " NO_VALUE "\nmax.value " NO_VALUE "\n");
+    }
+    return snprintf(out, size, "mean.value %.1f\nmax.value %d\n", (double)sum / tracked, strongest);
+}
+
+// The receiver reports 99.99 while it has no fix.
+static int fetch_dop(char *out, size_t size)
+{
+    gnss_status_t status;
+    gnss_get_status(&status);
+    const bool usable = gnss_fresh(&status) && status.hdop < NO_DOP_VALUE && status.pdop < NO_DOP_VALUE;
+    if (!usable) {
+        return snprintf(out, size, "hdop.value " NO_VALUE "\npdop.value " NO_VALUE "\n");
+    }
+    return snprintf(out, size, "hdop.value %.2f\npdop.value %.2f\n", status.hdop, status.pdop);
+}
+
+static int fetch_pps_offset(char *out, size_t size)
+{
+    gnss_pps_t pps;
+    gnss_get_pps(&pps);
+    if (!pps.present || pps.samples == 0) {
+        return snprintf(out, size, "offset.value " NO_VALUE "\n");
+    }
+    return snprintf(out, size, "offset.value %.2f\n", pps.offset_ppm);
+}
+
+static int fetch_pps_jitter(char *out, size_t size)
+{
+    gnss_pps_t pps;
+    gnss_get_pps(&pps);
+    if (!pps.present || pps.samples == 0) {
+        return snprintf(out, size, "jitter.value " NO_VALUE "\n");
+    }
+    return snprintf(out, size, "jitter.value %.2f\n", pps.jitter_us);
+}
+
+static const struct builtin_plugin builtin_plugins[] = {
+    {"gnss_satellites",
+     "graph_title GNSS satellites\n"
+     "graph_vlabel satellites\n"
+     "graph_category gnss\n"
+     "graph_args --base 1000 --lower-limit 0\n"
+     "in_view.label In view\n"
+     "tracked.label Tracked\n"
+     "used.label Used in fix\n",
+     fetch_satellites},
+    {"gnss_signal",
+     "graph_title GNSS signal strength\n"
+     "graph_vlabel dB-Hz\n"
+     "graph_category gnss\n"
+     "graph_args --base 1000 --lower-limit 0\n"
+     "mean.label Mean of tracked satellites\n"
+     "max.label Strongest satellite\n",
+     fetch_signal},
+    {"gnss_dop",
+     "graph_title GNSS dilution of precision\n"
+     "graph_vlabel DOP\n"
+     "graph_category gnss\n"
+     "graph_args --base 1000 --lower-limit 0\n"
+     "hdop.label HDOP\n"
+     "pdop.label PDOP\n",
+     fetch_dop},
+    {"gnss_pps_offset",
+     "graph_title PPS interval offset\n"
+     "graph_vlabel ppm\n"
+     "graph_category gnss\n"
+     "graph_args --base 1000\n"
+     "offset.label ESP32 clock offset\n"
+     "offset.info Mean error of the pulse interval over the last minute; positive means the ESP32 clock runs fast\n",
+     fetch_pps_offset},
+    {"gnss_pps_jitter",
+     "graph_title PPS jitter\n"
+     "graph_vlabel microseconds\n"
+     "graph_category gnss\n"
+     "graph_args --base 1000 --lower-limit 0\n"
+     "jitter.label Standard deviation of the pulse interval\n",
+     fetch_pps_jitter},
+};
+#define BUILTIN_PLUGIN_COUNT (sizeof(builtin_plugins) / sizeof(builtin_plugins[0]))
+
+static const struct builtin_plugin *find_builtin_plugin(const char *name)
+{
+    for (size_t i = 0; i < BUILTIN_PLUGIN_COUNT; i++) {
+        if (strcmp(builtin_plugins[i].name, name) == 0) {
+            return &builtin_plugins[i];
+        }
+    }
+    return NULL;
+}
 
 void munin_get_plugin_name(char plugin[SETTINGS_MUNIN_PLUGIN_MAX_LENGTH])
 {
@@ -37,6 +182,7 @@ esp_err_t munin_set_plugin_name(const char *plugin)
 {
     // Plugin names follow the same rule as field names.
     ESP_RETURN_ON_FALSE(sensors_name_valid(plugin), ESP_ERR_INVALID_ARG, TAG, "invalid plugin name");
+    ESP_RETURN_ON_FALSE(!find_builtin_plugin(plugin), ESP_ERR_INVALID_STATE, TAG, "name of a built-in plugin");
     ESP_RETURN_ON_ERROR(settings_save_munin_plugin(plugin), TAG, "store plugin name");
     portENTER_CRITICAL(&plugin_lock);
     snprintf(plugin_name, sizeof(plugin_name), "%s", plugin);
@@ -62,11 +208,29 @@ static const char *hostname(void)
 static void reply_list(int client)
 {
     sensor_info_t sensors[SENSORS_MAX];
-    char reply[LINE_SIZE];
+    const size_t sensor_count = sensors_snapshot(sensors);
+    bool any_named = false;
+    for (size_t i = 0; i < sensor_count; i++) {
+        any_named = any_named || sensors[i].name[0];
+    }
     char plugin[SETTINGS_MUNIN_PLUGIN_MAX_LENGTH];
     munin_get_plugin_name(plugin);
-    snprintf(reply, sizeof(reply), "%s\n", sensors_snapshot(sensors) > 0 ? plugin : "");
+
+    char reply[LIST_SIZE];
+    int length = snprintf(reply, sizeof(reply), "%s", any_named ? plugin : "");
+    for (size_t i = 0; i < BUILTIN_PLUGIN_COUNT; i++) {
+        length += snprintf(reply + length, sizeof(reply) - length, "%s%s", length ? " " : "", builtin_plugins[i].name);
+    }
+    snprintf(reply + length, sizeof(reply) - length, "\n");
     send_text(client, reply);
+}
+
+static void reply_builtin_fetch(int client, const struct builtin_plugin *plugin)
+{
+    char reply[FETCH_SIZE];
+    int length = plugin->fetch(reply, sizeof(reply) - sizeof(".\n"));
+    length += snprintf(reply + length, sizeof(reply) - length, ".\n");
+    send(client, reply, length, 0);
 }
 
 static void reply_config(int client)
@@ -120,7 +284,8 @@ static bool handle_command(int client, char *line)
     }
     char plugin[SETTINGS_MUNIN_PLUGIN_MAX_LENGTH];
     munin_get_plugin_name(plugin);
-    const bool plugin_ok = argument && strcmp(argument, plugin) == 0;
+    const bool sensor_plugin = argument && strcmp(argument, plugin) == 0;
+    const struct builtin_plugin *builtin = argument ? find_builtin_plugin(argument) : NULL;
     char reply[LINE_SIZE];
 
     if (strcmp(line, "list") == 0) {
@@ -128,10 +293,15 @@ static bool handle_command(int client, char *line)
     } else if (strcmp(line, "nodes") == 0) {
         snprintf(reply, sizeof(reply), "%s\n.\n", hostname());
         send_text(client, reply);
-    } else if (strcmp(line, "config") == 0 && plugin_ok) {
+    } else if (strcmp(line, "config") == 0 && sensor_plugin) {
         reply_config(client);
-    } else if (strcmp(line, "fetch") == 0 && plugin_ok) {
+    } else if (strcmp(line, "config") == 0 && builtin) {
+        send_text(client, builtin->config);
+        send_text(client, ".\n");
+    } else if (strcmp(line, "fetch") == 0 && sensor_plugin) {
         reply_fetch(client);
+    } else if (strcmp(line, "fetch") == 0 && builtin) {
+        reply_builtin_fetch(client, builtin);
     } else if (strcmp(line, "version") == 0) {
         snprintf(reply, sizeof(reply), "munin node on %s version: " NODE_VERSION "\n", hostname());
         send_text(client, reply);
@@ -204,7 +374,7 @@ esp_err_t munin_start(void)
         close(listener);
         return ESP_FAIL;
     }
-    ESP_RETURN_ON_FALSE(xTaskCreate(server_task, "munin", 4096, (void *)(intptr_t)listener, 3, NULL) == pdPASS,
+    ESP_RETURN_ON_FALSE(xTaskCreate(server_task, "munin", TASK_STACK_SIZE, (void *)(intptr_t)listener, 3, NULL) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "task");
     ESP_LOGI(TAG, "listening on tcp/%d", MUNIN_PORT);
     return ESP_OK;

@@ -234,8 +234,11 @@ progress { width: 100%; }
         <dt>ESP-IDF</dt><dd id="idf">-</dd>
         <dt>Uptime</dt><dd id="uptime">-</dd>
         <dt>Last reset</dt><dd id="reset">-</dd>
+        <dt>Reset history</dt><dd id="reset-history">-</dd>
         <dt>Free heap</dt><dd id="heap">-</dd>
       </dl>
+      <button type="button" class="secondary" id="reset-clear">Clear reset history</button>
+      <div class="result" id="reset-result"></div>
     </section>
   </div>
 </main>
@@ -327,7 +330,7 @@ function render(s) {
   set("idf", s.system.idf);
   set("slot", s.system.partition);
   set("uptime", duration(s.system.uptime_s));
-  set("reset", s.system.reset_reason, ["power-on", "software", "external pin"].includes(s.system.reset_reason) ? "" : "bad");
+  set("reset", s.system.reset_reason, NORMAL_RESETS.includes(s.system.reset_reason) ? "" : "bad");
   set("heap", (s.system.free_heap / 1024).toFixed(0) + " KiB");
 }
 
@@ -684,6 +687,17 @@ function renderPps(p) {
 }
 buildSky();
 
+const NORMAL_RESETS = ["power-on", "software", "external pin"];
+async function loadResets() {
+  const resets = await (await fetch("/api/resets", { cache: "no-store" })).json();
+  set("reset-history", resets.length ? resets.map(r => r.reason + " \u00d7" + r.count).join(", ") : "none recorded",
+      resets.some(r => !NORMAL_RESETS.includes(r.reason)) ? "warn" : "");
+}
+$("reset-clear").addEventListener("click", async () => {
+  await post("/api/resets", {}, "reset-result");
+  loadResets().catch(() => {});
+});
+
 async function tick() {
   try {
     const r = await fetch("/api/status", { cache: "no-store" });
@@ -699,6 +713,7 @@ async function tick() {
 loadNetwork().catch(() => {});
 loadReceiver().catch(() => {});
 loadPlugin().catch(() => {});
+loadResets().catch(() => {});
 tick();
 setInterval(tick, 1000);
 </script>

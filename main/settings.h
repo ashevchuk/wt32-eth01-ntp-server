@@ -64,6 +64,13 @@ esp_err_t settings_save_sensor_names(const sensor_name_t names[SETTINGS_MAX_SENS
 esp_err_t settings_load_munin_plugin(char plugin[SETTINGS_MUNIN_PLUGIN_MAX_LENGTH]);
 esp_err_t settings_save_munin_plugin(const char *plugin);
 
+#define SETTINGS_RESET_REASONS 16
+
+// Number of boots per esp_reset_reason_t value, kept across restarts.
+esp_err_t settings_load_reset_counts(uint32_t counts[SETTINGS_RESET_REASONS]);
+esp_err_t settings_record_reset(unsigned reason);
+esp_err_t settings_clear_reset_counts(void);
+
 // Delays that the GNSS receiver compensates in its time pulse; when not configured the receiver keeps its own.
 typedef struct {
     bool configured;
