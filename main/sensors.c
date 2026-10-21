@@ -52,6 +52,7 @@
 struct sensor {
     uint8_t rom[SETTINGS_ROM_LENGTH];
     char name[SETTINGS_SENSOR_NAME_MAX_LENGTH];
+    char label[SETTINGS_SENSOR_NAME_MAX_LENGTH];
     bool custom_name;
     bool munin;
     bool present;
@@ -65,6 +66,7 @@ static const char *TAG = "sensors";
 static struct sensor table[SENSORS_MAX];
 static size_t table_size;
 static sensor_name_t stored_names[SENSORS_MAX];
+static sensor_name_t stored_labels[SENSORS_MAX];
 static uint8_t munin_roms[SENSORS_MAX][SETTINGS_ROM_LENGTH];
 static portMUX_TYPE table_lock = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE bus_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -266,6 +268,16 @@ static const char *stored_name_for(const uint8_t rom[SETTINGS_ROM_LENGTH])
     return NULL;
 }
 
+static const char *stored_label_for(const uint8_t rom[SETTINGS_ROM_LENGTH])
+{
+    for (size_t i = 0; i < SENSORS_MAX; i++) {
+        if (stored_labels[i].name[0] && memcmp(stored_labels[i].rom, rom, SETTINGS_ROM_LENGTH) == 0) {
+            return stored_labels[i].name;
+        }
+    }
+    return NULL;
+}
+
 static void register_found(const uint8_t rom[SETTINGS_ROM_LENGTH])
 {
     portENTER_CRITICAL(&table_lock);
@@ -284,6 +296,10 @@ static void register_found(const uint8_t rom[SETTINGS_ROM_LENGTH])
             default_name(rom, entry->name);
         }
         entry->munin = published_in_munin(rom);
+        const char *label = stored_label_for(rom);
+        if (label) {
+            snprintf(entry->label, sizeof(entry->label), "%s", label);
+        }
     }
     portEXIT_CRITICAL(&table_lock);
     if (!known) {
@@ -386,6 +402,7 @@ size_t sensors_snapshot(sensor_info_t out[SENSORS_MAX])
     for (size_t i = 0; i < count; i++) {
         rom_to_id(table[i].rom, out[i].id);
         snprintf(out[i].name, sizeof(out[i].name), "%s", table[i].name);
+        snprintf(out[i].label, sizeof(out[i].label), "%s", table[i].label);
         out[i].munin = table[i].munin;
         out[i].present = table[i].present;
         out[i].has_reading = table[i].present && table[i].has_reading
@@ -454,6 +471,60 @@ esp_err_t sensors_rename(const char *id, const char *name)
     return result;
 }
 
+bool sensors_label_valid(const char *label)
+{
+    const size_t length = strlen(label);
+    if (length >= SETTINGS_SENSOR_NAME_MAX_LENGTH) {
+        return false;
+    }
+    for (size_t i = 0; i < length; i++) {
+        if (label[i] < ' ' || label[i] > '~' || label[i] == '"' || label[i] == '\\') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The stored list also keeps the labels of sensors that are not on the bus right now.
+esp_err_t sensors_set_label(const char *id, const char *label)
+{
+    if (!sensors_label_valid(label)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t result = ESP_ERR_NOT_FOUND;
+    sensor_name_t to_store[SENSORS_MAX];
+    portENTER_CRITICAL(&table_lock);
+    struct sensor *target = find_by_id(id);
+    if (target) {
+        result = ESP_OK;
+        size_t slot = SENSORS_MAX;
+        for (size_t i = 0; i < SENSORS_MAX; i++) {
+            if (memcmp(stored_labels[i].rom, target->rom, SETTINGS_ROM_LENGTH) == 0 && stored_labels[i].name[0]) {
+                slot = i;
+            }
+        }
+        for (size_t i = 0; i < SENSORS_MAX && slot == SENSORS_MAX; i++) {
+            if (!stored_labels[i].name[0]) {
+                slot = i;
+            }
+        }
+        if (slot == SENSORS_MAX) {
+            result = ESP_ERR_NO_MEM;
+        } else {
+            memcpy(stored_labels[slot].rom, target->rom, SETTINGS_ROM_LENGTH);
+            snprintf(stored_labels[slot].name, sizeof(stored_labels[slot].name), "%s", label);
+            snprintf(target->label, sizeof(target->label), "%s", label);
+            memcpy(to_store, stored_labels, sizeof(to_store));
+        }
+    }
+    portEXIT_CRITICAL(&table_lock);
+
+    if (result == ESP_OK) {
+        ESP_RETURN_ON_ERROR(settings_save_sensor_labels(to_store), TAG, "store labels");
+    }
+    return result;
+}
+
 esp_err_t sensors_set_munin(const char *id, bool enabled)
 {
     esp_err_t result = ESP_ERR_NOT_FOUND;
@@ -500,6 +571,7 @@ esp_err_t sensors_start(void)
     bus_release();
     ESP_RETURN_ON_ERROR(settings_load_sensor_names(stored_names), TAG, "load names");
     ESP_RETURN_ON_ERROR(settings_load_munin_sensors(munin_roms), TAG, "load munin sensors");
+    ESP_RETURN_ON_ERROR(settings_load_sensor_labels(stored_labels), TAG, "load labels");
     ESP_RETURN_ON_FALSE(xTaskCreatePinnedToCore(sensor_task, "sensors", SENSOR_TASK_STACK, NULL,
                                                 SENSOR_TASK_PRIORITY, NULL, SENSOR_TASK_CORE) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "task");

@@ -590,8 +590,9 @@ static esp_err_t sensors_get_handler(httpd_req_t *req)
     out.length = 0;
     json_printf(&out, "[");
     for (size_t i = 0; i < count; i++) {
-        json_printf(&out, "%s{\"id\":\"%s\",\"name\":\"%s\",\"munin\":%s,\"present\":%s,\"temperature\":", i ? "," : "",
-                    sensors[i].id, sensors[i].name, sensors[i].munin ? "true" : "false", sensors[i].present ? "true" : "false");
+        json_printf(&out, "%s{\"id\":\"%s\",\"name\":\"%s\",\"label\":\"%s\",\"munin\":%s,\"present\":%s,\"temperature\":", i ? "," : "",
+                    sensors[i].id, sensors[i].name, sensors[i].label, sensors[i].munin ? "true" : "false",
+                    sensors[i].present ? "true" : "false");
         if (sensors[i].has_reading) {
             json_printf(&out, "%.2f}", sensors[i].temperature_c);
         } else {
@@ -606,13 +607,14 @@ static esp_err_t sensors_get_handler(httpd_req_t *req)
 
 static esp_err_t sensors_post_handler(httpd_req_t *req)
 {
-    char form[FORM_BUFFER_SIZE], id[PARAM_SIZE], name[PARAM_SIZE], munin[PARAM_SIZE];
+    char form[FORM_BUFFER_SIZE], id[PARAM_SIZE], name[PARAM_SIZE], label[PARAM_SIZE], munin[PARAM_SIZE];
     if (!read_form(req, form) || !form_value(form, "id", id)) {
         return web_respond(req, HTTPD_400, "missing sensor id");
     }
     const bool has_name = form_value(form, "name", name);
+    const bool has_label = form_value(form, "label", label);
     const bool has_munin = form_value(form, "munin", munin);
-    if (!has_name && !has_munin) {
+    if (!has_name && !has_label && !has_munin) {
         return web_respond(req, HTTPD_400, "nothing to change");
     }
     if (has_munin) {
@@ -639,7 +641,19 @@ static esp_err_t sensors_post_handler(httpd_req_t *req)
             return web_respond(req, HTTPD_500, "could not store the name");
         }
     }
-    return web_respond(req, HTTPD_200, has_name ? "name saved" : "Munin setting saved");
+    if (has_label) {
+        switch (sensors_set_label(id, label)) {
+        case ESP_OK:
+            break;
+        case ESP_ERR_NOT_FOUND:
+            return web_respond(req, HTTPD_400, "unknown sensor");
+        case ESP_ERR_INVALID_ARG:
+            return web_respond(req, HTTPD_400, "label must be up to 31 printable ASCII characters without quotes or backslash");
+        default:
+            return web_respond(req, HTTPD_500, "could not store the label");
+        }
+    }
+    return web_respond(req, HTTPD_200, "saved");
 }
 
 static esp_err_t munin_get_handler(httpd_req_t *req)

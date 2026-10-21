@@ -58,6 +58,10 @@ typedef struct {
 esp_err_t settings_load_sensor_names(sensor_name_t names[SETTINGS_MAX_SENSORS]);
 esp_err_t settings_save_sensor_names(const sensor_name_t names[SETTINGS_MAX_SENSORS]);
 
+// The text Munin shows for a sensor; stored like the names, with the label in the name field.
+esp_err_t settings_load_sensor_labels(sensor_name_t labels[SETTINGS_MAX_SENSORS]);
+esp_err_t settings_save_sensor_labels(const sensor_name_t labels[SETTINGS_MAX_SENSORS]);
+
 // ROM codes of the sensors published in Munin; an all-zero entry is unused.
 esp_err_t settings_load_munin_sensors(uint8_t roms[SETTINGS_MAX_SENSORS][SETTINGS_ROM_LENGTH]);
 esp_err_t settings_save_munin_sensors(const uint8_t roms[SETTINGS_MAX_SENSORS][SETTINGS_ROM_LENGTH]);

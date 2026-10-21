@@ -13,6 +13,7 @@
 typedef struct {
     char id[SENSOR_ID_LENGTH];
     char name[SETTINGS_SENSOR_NAME_MAX_LENGTH];
+    char label[SETTINGS_SENSOR_NAME_MAX_LENGTH];
     bool present;
     bool has_reading;
     bool munin;
@@ -31,6 +32,12 @@ bool sensors_name_valid(const char *name);
 // An empty name restores the default derived from the ROM code.
 // ESP_ERR_NOT_FOUND: unknown id; ESP_ERR_INVALID_ARG: bad name; ESP_ERR_INVALID_STATE: name already used.
 esp_err_t sensors_rename(const char *id, const char *name);
+
+// A label is the text Munin shows for the sensor: up to 31 printable ASCII characters without quotes or backslash.
+bool sensors_label_valid(const char *label);
+
+// An empty label makes Munin show the name. ESP_ERR_NOT_FOUND: unknown id; ESP_ERR_INVALID_ARG: bad label.
+esp_err_t sensors_set_label(const char *id, const char *label);
 
 // Publishes the sensor in Munin or stops doing so. ESP_ERR_NOT_FOUND: unknown id.
 esp_err_t sensors_set_munin(const char *id, bool enabled);

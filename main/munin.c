@@ -302,8 +302,8 @@ static void reply_config(int client)
         if (!sensors[i].munin) {
             continue;
         }
-        length += snprintf(reply + length, sizeof(reply) - length, "%s.label %s\n%s.info DS18B20 %s\n",
-                           sensors[i].name, sensors[i].name, sensors[i].name, sensors[i].id);
+        length += snprintf(reply + length, sizeof(reply) - length, "%s.label %s\n%s.info DS18B20 %s\n", sensors[i].name,
+                           sensors[i].label[0] ? sensors[i].label : sensors[i].name, sensors[i].name, sensors[i].id);
     }
     length += snprintf(reply + length, sizeof(reply) - length, ".\n");
     send(client, reply, length < (int)sizeof(reply) ? length : (int)sizeof(reply) - 1, 0);

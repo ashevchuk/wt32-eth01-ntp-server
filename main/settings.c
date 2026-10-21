@@ -22,6 +22,7 @@
 #define KEY_UPSTREAM "upstream"
 #define KEY_RESETS "resets"
 #define KEY_MUNIN_SENSORS "munin_sensors"
+#define KEY_SENSOR_LABELS "sensor_labels"
 #define DEFAULT_UPSTREAM "pool.ntp.org"
 #define DEFAULT_MUNIN_PLUGIN "environment"
 #define DEFAULT_HOSTNAME "ntp-server"
@@ -270,9 +271,9 @@ esp_err_t settings_save_munin_sensors(const uint8_t roms[SETTINGS_MAX_SENSORS][S
     return err;
 }
 
-esp_err_t settings_load_sensor_names(sensor_name_t names[SETTINGS_MAX_SENSORS])
+static esp_err_t load_sensor_texts(const char *key, sensor_name_t out[SETTINGS_MAX_SENSORS])
 {
-    memset(names, 0, sizeof(sensor_name_t) * SETTINGS_MAX_SENSORS);
+    memset(out, 0, sizeof(sensor_name_t) * SETTINGS_MAX_SENSORS);
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NAMESPACE, NVS_READONLY, &handle);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
@@ -282,25 +283,45 @@ esp_err_t settings_load_sensor_names(sensor_name_t names[SETTINGS_MAX_SENSORS])
 
     sensor_name_t stored[SETTINGS_MAX_SENSORS];
     size_t size = sizeof(stored);
-    err = nvs_get_blob(handle, KEY_SENSORS, stored, &size);
+    err = nvs_get_blob(handle, key, stored, &size);
     nvs_close(handle);
     if (err == ESP_OK && size == sizeof(stored)) {
-        memcpy(names, stored, sizeof(stored));
+        memcpy(out, stored, sizeof(stored));
         return ESP_OK;
     }
     return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
 }
 
-esp_err_t settings_save_sensor_names(const sensor_name_t names[SETTINGS_MAX_SENSORS])
+static esp_err_t save_sensor_texts(const char *key, const sensor_name_t in[SETTINGS_MAX_SENSORS])
 {
     nvs_handle_t handle;
     ESP_RETURN_ON_ERROR(nvs_open(NAMESPACE, NVS_READWRITE, &handle), TAG, "open");
-    esp_err_t err = nvs_set_blob(handle, KEY_SENSORS, names, sizeof(sensor_name_t) * SETTINGS_MAX_SENSORS);
+    esp_err_t err = nvs_set_blob(handle, key, in, sizeof(sensor_name_t) * SETTINGS_MAX_SENSORS);
     if (err == ESP_OK) {
         err = nvs_commit(handle);
     }
     nvs_close(handle);
     return err;
+}
+
+esp_err_t settings_load_sensor_names(sensor_name_t names[SETTINGS_MAX_SENSORS])
+{
+    return load_sensor_texts(KEY_SENSORS, names);
+}
+
+esp_err_t settings_save_sensor_names(const sensor_name_t names[SETTINGS_MAX_SENSORS])
+{
+    return save_sensor_texts(KEY_SENSORS, names);
+}
+
+esp_err_t settings_load_sensor_labels(sensor_name_t labels[SETTINGS_MAX_SENSORS])
+{
+    return load_sensor_texts(KEY_SENSOR_LABELS, labels);
+}
+
+esp_err_t settings_save_sensor_labels(const sensor_name_t labels[SETTINGS_MAX_SENSORS])
+{
+    return save_sensor_texts(KEY_SENSOR_LABELS, labels);
 }
 
 esp_err_t settings_load_munin_plugin(char plugin[SETTINGS_MUNIN_PLUGIN_MAX_LENGTH])

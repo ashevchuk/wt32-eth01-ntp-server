@@ -41,6 +41,7 @@ button:disabled, input:disabled { opacity: .5; cursor: not-allowed; }
 .sensor .reading { font: 600 20px/1.2 ui-monospace, monospace; text-align: right; }
 .sensor .id { grid-column: 1 / -1; color: var(--muted); font-size: 12px; word-break: break-all; }
 .sensor button { width: auto; }
+.sensor .label-input { grid-column: 1 / -1; }
 .sensor .munin-toggle { display: flex; align-items: center; gap: 6px; justify-self: end; color: var(--text); font-size: 13px; }
 .sensor .munin-toggle input { width: auto; }
 progress { width: 100%; }
@@ -226,7 +227,7 @@ progress { width: 100%; }
         <input id="plugin-name" maxlength="31" spellcheck="false" autocomplete="off">
         <button type="submit">Save plugin name</button>
       </form>
-      <div class="result" id="sensor-result">The name is the Munin field name: letters, digits, underscore. Leave it empty to restore the default. The checkbox publishes the sensor in Munin.</div>
+      <div class="result" id="sensor-result">The name is the Munin field name (letters, digits, underscore) and identifies the graph line and its history, so a new name starts a new history; leave it empty to restore the default. The label is only the text shown in the graph; leave it empty to show the name. The checkbox publishes the sensor in Munin.</div>
     </section>
     <section class="card">
       <h2>Firmware update</h2>
@@ -553,10 +554,17 @@ function buildSensorRow(sensor) {
   input.maxLength = 31;
   input.spellcheck = false;
   input.autocomplete = "off";
+  const label = document.createElement("input");
+  label.className = "label-input";
+  label.value = sensor.label;
+  label.placeholder = "Munin label (optional, the name is shown when empty)";
+  label.maxLength = 31;
+  label.spellcheck = false;
+  label.autocomplete = "off";
   const reading = document.createElement("div");
   reading.className = "reading";
   const save = document.createElement("button");
-  save.textContent = "Save name";
+  save.textContent = "Save";
   const toggle = document.createElement("label");
   toggle.className = "munin-toggle";
   const box = document.createElement("input");
@@ -566,15 +574,15 @@ function buildSensorRow(sensor) {
   const id = document.createElement("div");
   id.className = "id";
   id.textContent = sensor.id;
-  row.append(input, reading, save, toggle, id);
+  row.append(input, reading, label, save, toggle, id);
   row.addEventListener("submit", e => {
     e.preventDefault();
-    post("/api/sensors", { id: sensor.id, name: input.value.trim() }, "sensor-result");
+    post("/api/sensors", { id: sensor.id, name: input.value.trim(), label: label.value.trim() }, "sensor-result");
   });
   box.addEventListener("change", () => {
     post("/api/sensors", { id: sensor.id, munin: box.checked ? "1" : "0" }, "sensor-result");
   });
-  return { row, input, reading, box };
+  return { row, input, label, reading, box };
 }
 
 function renderSensors(sensors) {
@@ -594,6 +602,9 @@ function renderSensors(sensors) {
     }
     if (document.activeElement !== entry.box) {
       entry.box.checked = sensor.munin;
+    }
+    if (document.activeElement !== entry.label && entry.label.value !== sensor.label) {
+      entry.label.value = sensor.label;
     }
     entry.reading.textContent = sensor.temperature === null ? "no data" : sensor.temperature.toFixed(2) + " °C";
     entry.reading.className = "reading" + (sensor.temperature === null ? " bad" : "");
