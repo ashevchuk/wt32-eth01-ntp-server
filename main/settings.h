@@ -89,6 +89,25 @@ typedef struct {
 esp_err_t settings_load_pps_delay(pps_delay_settings_t *delay);
 esp_err_t settings_save_pps_delay(const pps_delay_settings_t *delay);
 
+// New modes go at the end: the stored value is the enum number.
+typedef enum { DISPLAY_MODE_BIG, DISPLAY_MODE_TEXT, DISPLAY_MODE_ROTATE, DISPLAY_MODE_BIG_DATE, DISPLAY_MODE_COUNT } display_mode_t;
+
+// Screens taking part in the rotation, as a bit mask.
+#define DISPLAY_FACE_BIG 1
+#define DISPLAY_FACE_BIG_DATE 2
+#define DISPLAY_FACE_TEXT 4
+#define DISPLAY_FACES_ALL (DISPLAY_FACE_BIG | DISPLAY_FACE_BIG_DATE | DISPLAY_FACE_TEXT)
+
+typedef struct {
+    display_mode_t mode;
+    uint32_t rotate_s;
+    uint8_t rotate_faces;
+} display_settings_t;
+
+// Defaults to the big clock, rotating all screens every 10 s.
+esp_err_t settings_load_display(display_settings_t *display);
+esp_err_t settings_save_display(const display_settings_t *display);
+
 #define SETTINGS_UPSTREAM_MAX_LENGTH 64
 
 // Host name or IPv4 address of the fallback NTP server; empty means "off". Defaults to pool.ntp.org.

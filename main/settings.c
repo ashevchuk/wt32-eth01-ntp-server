@@ -20,6 +20,10 @@
 #define KEY_MUNIN_PLUGIN "munin_plugin"
 #define KEY_PPS_DELAY "pps_delay"
 #define KEY_UPSTREAM "upstream"
+#define KEY_DISPLAY_MODE "display_mode"
+#define KEY_DISPLAY_ROTATE "display_rotate"
+#define KEY_DISPLAY_FACES "display_faces"
+#define DEFAULT_DISPLAY_ROTATE_S 10
 #define KEY_RESETS "resets"
 #define KEY_MUNIN_SENSORS "munin_sensors"
 #define KEY_SENSOR_LABELS "sensor_labels"
@@ -455,6 +459,49 @@ esp_err_t settings_save_upstream(const char *server)
     nvs_handle_t handle;
     ESP_RETURN_ON_ERROR(nvs_open(NAMESPACE, NVS_READWRITE, &handle), TAG, "open");
     esp_err_t err = nvs_set_str(handle, KEY_UPSTREAM, server);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t settings_load_display(display_settings_t *display)
+{
+    display->mode = DISPLAY_MODE_BIG;
+    display->rotate_s = DEFAULT_DISPLAY_ROTATE_S;
+    display->rotate_faces = DISPLAY_FACES_ALL;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NAMESPACE, NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(err, TAG, "open");
+    uint8_t mode;
+    if (nvs_get_u8(handle, KEY_DISPLAY_MODE, &mode) == ESP_OK && mode < DISPLAY_MODE_COUNT) {
+        display->mode = mode;
+    }
+    nvs_get_u32(handle, KEY_DISPLAY_ROTATE, &display->rotate_s);
+    uint8_t faces;
+    if (nvs_get_u8(handle, KEY_DISPLAY_FACES, &faces) == ESP_OK && faces != 0 && (faces & ~DISPLAY_FACES_ALL) == 0) {
+        display->rotate_faces = faces;
+    }
+    nvs_close(handle);
+    return ESP_OK;
+}
+
+esp_err_t settings_save_display(const display_settings_t *display)
+{
+    nvs_handle_t handle;
+    ESP_RETURN_ON_ERROR(nvs_open(NAMESPACE, NVS_READWRITE, &handle), TAG, "open");
+    esp_err_t err = nvs_set_u8(handle, KEY_DISPLAY_MODE, display->mode);
+    if (err == ESP_OK) {
+        err = nvs_set_u32(handle, KEY_DISPLAY_ROTATE, display->rotate_s);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u8(handle, KEY_DISPLAY_FACES, display->rotate_faces);
+    }
     if (err == ESP_OK) {
         err = nvs_commit(handle);
     }

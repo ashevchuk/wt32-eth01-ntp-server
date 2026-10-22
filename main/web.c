@@ -21,6 +21,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "bigclock.h"
 #include "gnss.h"
 #include "eth.h"
 #include "gnss_config.h"
@@ -684,6 +685,51 @@ static esp_err_t munin_post_handler(httpd_req_t *req)
     }
 }
 
+static const char *const DISPLAY_MODE_NAMES[] = {"big", "text", "rotate", "bigdate"};
+
+static esp_err_t display_get_handler(httpd_req_t *req)
+{
+    display_settings_t display;
+    char body[80];
+    bigclock_get_display(&display);
+    snprintf(body, sizeof(body), "{\"mode\":\"%s\",\"rotate_s\":%lu,\"faces\":%u}",
+             DISPLAY_MODE_NAMES[display.mode], (unsigned long)display.rotate_s, display.rotate_faces);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t display_post_handler(httpd_req_t *req)
+{
+    char form[FORM_BUFFER_SIZE], mode[PARAM_SIZE], rotate[PARAM_SIZE], faces[PARAM_SIZE];
+    if (!read_form(req, form) || !form_value(form, "mode", mode) || !form_value(form, "rotate_s", rotate) ||
+        !form_value(form, "faces", faces)) {
+        return web_respond(req, HTTPD_400, "missing display settings");
+    }
+    display_settings_t display = {.mode = DISPLAY_MODE_COUNT};
+    for (size_t i = 0; i < sizeof(DISPLAY_MODE_NAMES) / sizeof(DISPLAY_MODE_NAMES[0]); i++) {
+        if (strcmp(mode, DISPLAY_MODE_NAMES[i]) == 0) {
+            display.mode = (display_mode_t)i;
+        }
+    }
+    char *end, *faces_end;
+    display.rotate_s = strtoul(rotate, &end, 10);
+    const unsigned long face_mask = strtoul(faces, &faces_end, 10);
+    display.rotate_faces = face_mask;
+    if (display.mode == DISPLAY_MODE_COUNT || end == rotate || *end != '\0' || faces_end == faces ||
+        *faces_end != '\0' || face_mask > UINT8_MAX) {
+        return web_respond(req, HTTPD_400, "invalid display settings");
+    }
+    switch (bigclock_set_display(&display)) {
+    case ESP_OK:
+        return web_respond(req, HTTPD_200, "display saved");
+    case ESP_ERR_INVALID_ARG:
+        return web_respond(req, HTTPD_400, "rotation period must be 2 to 3600 seconds and at least one screen must be selected");
+    default:
+        return web_respond(req, HTTPD_500, "could not store the display settings");
+    }
+}
+
 static void number_or_null(char text[NUMBER_TEXT_SIZE], int value)
 {
     if (value == GNSS_UNKNOWN) {
@@ -837,6 +883,8 @@ esp_err_t web_start(void)
         {.uri = "/api/upstream", .method = HTTP_POST, .handler = upstream_post_handler},
         {.uri = "/api/munin", .method = HTTP_GET, .handler = munin_get_handler},
         {.uri = "/api/munin", .method = HTTP_POST, .handler = munin_post_handler},
+        {.uri = "/api/display", .method = HTTP_GET, .handler = display_get_handler},
+        {.uri = "/api/display", .method = HTTP_POST, .handler = display_post_handler},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &routes[i]), TAG, "register %s", routes[i].uri);

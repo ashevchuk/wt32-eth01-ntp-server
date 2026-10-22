@@ -14,21 +14,26 @@
           --ok: #4cc38a; --warn: #e5a244; --bad: #ee7b6e; }
 }
 * { box-sizing: border-box; }
-body { margin: 0; padding: 16px; background: var(--bg); color: var(--text);
-       font: 15px/1.45 system-ui, sans-serif; }
+body { margin: 0; padding: 10px; background: var(--bg); color: var(--text);
+       font: 14px/1.35 system-ui, sans-serif; }
 main { max-width: 1440px; margin: 0 auto; }
-h1 { font-size: 20px; margin: 0 0 4px; }
-.sub { color: var(--muted); margin-bottom: 16px; }
-.clock { font: 600 40px/1.1 ui-monospace, monospace; letter-spacing: 1px; }
-.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
-.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
-dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+h1 { font-size: 20px; margin: 0 0 8px; }
+.dot { display: inline-block; width: 12px; height: 12px; margin-right: 8px; border-radius: 50%;
+       background: currentColor; color: var(--muted); }
+.clock { font: 600 32px/1.1 ui-monospace, monospace; letter-spacing: 1px; }
+.tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+.tabs button { width: auto; padding: 4px 14px; }
+.tabs button.active { background: var(--text); color: var(--card); border-color: var(--text); }
+[data-tab-panel][hidden] { display: none; }
+.grid { display: grid; gap: 8px; grid-auto-flow: dense; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 6px; }
+dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
 dt { color: var(--muted); white-space: nowrap; }
 dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
 a { color: inherit; }
-form { display: grid; gap: 8px; }
+form { display: grid; gap: 6px; }
 label { color: var(--muted); font-size: 13px; }
 input, select, button { font: inherit; color: var(--text); background: var(--bg);
   border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%; }
@@ -36,7 +41,7 @@ button { cursor: pointer; background: var(--text); color: var(--card); border: 0
 button.secondary { background: var(--bg); color: var(--text); border: 1px solid var(--line); }
 button:disabled, input:disabled { opacity: .5; cursor: not-allowed; }
 .result { min-height: 1.4em; font-size: 13px; }
-.sensor { display: grid; grid-template-columns: 1fr auto; gap: 6px 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+.sensor { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; padding: 5px 0; border-top: 1px solid var(--line); }
 .sensor:first-child { border-top: 0; }
 .sensor .reading { font: 600 20px/1.2 ui-monospace, monospace; text-align: right; }
 .sensor .id { grid-column: 1 / -1; color: var(--muted); font-size: 12px; word-break: break-all; }
@@ -46,24 +51,34 @@ button:disabled, input:disabled { opacity: .5; cursor: not-allowed; }
 .sensor .munin-toggle input { width: auto; }
 progress { width: 100%; }
 .wide { grid-column: 1 / -1; }
-.signals { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 16px 24px; align-items: start; }
+.signals { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 10px 16px; align-items: start; }
 @media (max-width: 760px) { .signals { grid-template-columns: 1fr; } }
 .signals svg { display: block; width: 100%; }
 .signals .bars svg { height: 240px; }
 #sky-note { min-height: 2.9em; }
 .signals.stale svg { opacity: .35; }
-.signals .pps { margin-top: 14px; }
+.signals .pps { margin-top: 8px; }
 .none { color: var(--muted); }
 .sky-grid, .sky-axis { fill: none; stroke: var(--line); }
 .svg-label { fill: var(--muted); font-size: 9px; }
+#display-faces { border: 1px solid var(--line); border-radius: 6px; display: grid; gap: 4px; margin: 0; }
+#display-faces label { color: var(--text); font-size: 14px; display: flex; align-items: center; gap: 6px; }
+#display-faces input { width: auto; }
 .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
 </style>
 </head>
 <body>
 <main>
-  <h1>NTP server</h1>
-  <div class="sub" id="conn">connecting…</div>
-  <div class="grid">
+  <h1><span class="dot" id="state" title="connecting"></span>NTP server</h1>
+  <nav class="tabs" id="tabs">
+    <button type="button" class="secondary" data-tab="time">Time</button>
+    <button type="button" class="secondary" data-tab="gnss">GNSS</button>
+    <button type="button" class="secondary" data-tab="network">Network</button>
+    <button type="button" class="secondary" data-tab="sensors">Sensors</button>
+    <button type="button" class="secondary" data-tab="display">Display</button>
+    <button type="button" class="secondary" data-tab="system">System</button>
+  </nav>
+  <div class="grid" data-tab-panel="time">
     <section class="card">
       <h2>Time (UTC)</h2>
       <div class="clock" id="utc">--:--:--</div>
@@ -77,17 +92,25 @@ progress { width: 100%; }
       </dl>
     </section>
     <section class="card">
-      <h2>GNSS</h2>
-      <dl>
-        <dt>Fix</dt><dd id="fix">-</dd>
-        <dt>Satellites used / in view</dt><dd id="sats">-</dd>
-        <dt>HDOP / PDOP</dt><dd id="dop">-</dd>
-        <dt>Latitude</dt><dd id="lat">-</dd>
-        <dt>Longitude</dt><dd id="lon">-</dd>
-        <dt>Altitude</dt><dd id="alt">-</dd>
-        <dt>Speed / course</dt><dd id="motion">-</dd>
-        <dt>Leap second</dt><dd id="leap">-</dd>
-      </dl>
+      <h2>Timezone</h2>
+      <form id="tz-form">
+        <label for="tz-preset">Zone</label>
+        <select id="tz-preset"></select>
+        <label for="tz-custom">POSIX TZ string</label>
+        <input id="tz-custom" maxlength="63" spellcheck="false" autocomplete="off">
+        <button type="submit">Save timezone</button>
+        <div class="result" id="tz-result"></div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>Set time manually (UTC)</h2>
+      <form id="time-form">
+        <label for="time-value">Date and time</label>
+        <input id="time-value" type="datetime-local" step="1" required>
+        <button type="button" class="secondary" id="time-browser">Use this computer's time</button>
+        <button type="submit" id="time-submit">Set time</button>
+        <div class="result" id="time-result">Accepted only while neither GNSS nor network time is available.</div>
+      </form>
     </section>
     <section class="card">
       <h2>Fallback NTP server</h2>
@@ -105,6 +128,8 @@ progress { width: 100%; }
         <div class="result" id="up-result">Used when GNSS time is not available. The offset is only known while GNSS is the source and is limited by internet jitter.</div>
       </form>
     </section>
+  </div>
+  <div class="grid" data-tab-panel="gnss">
     <section class="card wide">
       <h2>GNSS signals</h2>
       <div class="signals" id="signals">
@@ -135,6 +160,19 @@ progress { width: 100%; }
       </div>
     </section>
     <section class="card">
+      <h2>GNSS</h2>
+      <dl>
+        <dt>Fix</dt><dd id="fix">-</dd>
+        <dt>Satellites used / in view</dt><dd id="sats">-</dd>
+        <dt>HDOP / PDOP</dt><dd id="dop">-</dd>
+        <dt>Latitude</dt><dd id="lat">-</dd>
+        <dt>Longitude</dt><dd id="lon">-</dd>
+        <dt>Altitude</dt><dd id="alt">-</dd>
+        <dt>Speed / course</dt><dd id="motion">-</dd>
+        <dt>Leap second</dt><dd id="leap">-</dd>
+      </dl>
+    </section>
+    <section class="card">
       <h2>GNSS receiver</h2>
       <dl>
         <dt>Dynamic model</dt><dd id="rx-model">-</dd>
@@ -149,6 +187,8 @@ progress { width: 100%; }
         <div class="result" id="rx-result">The receiver is written only when a value changed.</div>
       </form>
     </section>
+  </div>
+  <div class="grid" data-tab-panel="network">
     <section class="card">
       <h2>Ethernet</h2>
       <dl>
@@ -198,27 +238,8 @@ progress { width: 100%; }
         <div class="result" id="net-result">Changes apply after a restart.</div>
       </form>
     </section>
-    <section class="card">
-      <h2>Timezone</h2>
-      <form id="tz-form">
-        <label for="tz-preset">Zone</label>
-        <select id="tz-preset"></select>
-        <label for="tz-custom">POSIX TZ string</label>
-        <input id="tz-custom" maxlength="63" spellcheck="false" autocomplete="off">
-        <button type="submit">Save timezone</button>
-        <div class="result" id="tz-result"></div>
-      </form>
-    </section>
-    <section class="card">
-      <h2>Set time manually (UTC)</h2>
-      <form id="time-form">
-        <label for="time-value">Date and time</label>
-        <input id="time-value" type="datetime-local" step="1" required>
-        <button type="button" class="secondary" id="time-browser">Use this computer's time</button>
-        <button type="submit" id="time-submit">Set time</button>
-        <div class="result" id="time-result">Accepted only while neither GNSS nor network time is available.</div>
-      </form>
-    </section>
+  </div>
+  <div class="grid" data-tab-panel="sensors">
     <section class="card">
       <h2>Temperature sensors (DS18B20)</h2>
       <div id="sensors"><span class="sub">No sensors found yet.</span></div>
@@ -229,6 +250,32 @@ progress { width: 100%; }
       </form>
       <div class="result" id="sensor-result">The name is the Munin field name (letters, digits, underscore) and identifies the graph line and its history, so a new name starts a new history; leave it empty to restore the default. The label is only the text shown in the graph; leave it empty to show the name. The checkbox publishes the sensor in Munin.</div>
     </section>
+  </div>
+  <div class="grid" data-tab-panel="display">
+    <section class="card">
+      <h2>LCD display</h2>
+      <form id="display-form">
+        <label for="display-mode">Screen</label>
+        <select id="display-mode">
+          <option value="big">Big clock</option>
+          <option value="bigdate">Big clock without seconds, with date</option>
+          <option value="text">Time, date and weekday</option>
+          <option value="rotate">Alternate all</option>
+        </select>
+        <fieldset id="display-faces">
+          <legend>Screens in the rotation</legend>
+          <label><input type="checkbox" value="1"> Big clock</label>
+          <label><input type="checkbox" value="2"> Big clock with date</label>
+          <label><input type="checkbox" value="4"> Time, date and weekday</label>
+        </fieldset>
+        <label for="display-rotate">Seconds per screen when alternating</label>
+        <input id="display-rotate" type="number" min="2" max="3600">
+        <button type="submit">Save display</button>
+        <div class="result" id="display-result"></div>
+      </form>
+    </section>
+  </div>
+  <div class="grid" data-tab-panel="system">
     <section class="card">
       <h2>Firmware update</h2>
       <form id="ota-form">
@@ -283,6 +330,12 @@ function set(id, text, cls) {
   el.className = cls || "";
 }
 
+function showState(cls, title) {
+  const dot = $("state");
+  dot.className = "dot " + cls;
+  dot.title = title;
+}
+
 function duration(seconds) {
   const d = Math.floor(seconds / 86400), h = Math.floor(seconds % 86400 / 3600),
         m = Math.floor(seconds % 3600 / 60), s = seconds % 60;
@@ -298,6 +351,7 @@ function render(s) {
   initTimezone(t.timezone);
   renderUpstream(t.upstream);
   set("source", t.source, SOURCE_CLASS[t.source]);
+  showState(SOURCE_CLASS[t.source], `${t.source}, stratum ${t.stratum}`);
   set("stratum", t.stratum);
   set("rtc", t.rtc_valid ? t.rtc : "invalid", t.rtc_valid ? "" : "warn");
   set("requests", s.ntp.requests);
@@ -517,6 +571,33 @@ $("plugin-form").addEventListener("submit", e => {
   e.preventDefault();
   post("/api/munin", { plugin: $("plugin-name").value.trim() }, "sensor-result");
 });
+
+$("display-mode").addEventListener("change", updateDisplayForm);
+$("display-form").addEventListener("submit", e => {
+  e.preventDefault();
+  post("/api/display", { mode: $("display-mode").value, rotate_s: $("display-rotate").value, faces: displayFaces() },
+       "display-result");
+});
+
+const displayFaceBoxes = () => document.querySelectorAll("#display-faces input");
+
+function displayFaces() {
+  return [...displayFaceBoxes()].reduce((mask, box) => mask | (box.checked ? Number(box.value) : 0), 0);
+}
+
+function updateDisplayForm() {
+  const rotating = $("display-mode").value === "rotate";
+  $("display-rotate").disabled = !rotating;
+  displayFaceBoxes().forEach(box => { box.disabled = !rotating; });
+}
+
+async function loadDisplay() {
+  const d = await (await fetch("/api/display", { cache: "no-store" })).json();
+  $("display-mode").value = d.mode;
+  $("display-rotate").value = d.rotate_s;
+  displayFaceBoxes().forEach(box => { box.checked = (d.faces & Number(box.value)) !== 0; });
+  updateDisplayForm();
+}
 
 async function loadPlugin() {
   $("plugin-name").value = (await (await fetch("/api/munin", { cache: "no-store" })).json()).plugin;
@@ -803,17 +884,27 @@ async function tick() {
     render(await r.json());
     renderSensors(await (await fetch("/api/sensors", { cache: "no-store" })).json());
     renderSignals(await (await fetch("/api/gnss/satellites", { cache: "no-store" })).json());
-    set("conn", "live");
   } catch (e) {
-    set("conn", "offline", "bad");
+    showState("bad", "device not responding");
   }
 }
 loadNetwork().catch(() => {});
 loadReceiver().catch(() => {});
 loadPlugin().catch(() => {});
+loadDisplay().catch(() => {});
 loadResets().catch(() => {});
 tick();
 setInterval(tick, 1000);
+
+const tabButtons = document.querySelectorAll('#tabs button');
+const tabPanels = document.querySelectorAll('[data-tab-panel]');
+function showTab(name) {
+  tabButtons.forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  tabPanels.forEach(p => { p.hidden = p.dataset.tabPanel !== name; });
+  history.replaceState(null, '', '#' + name);
+}
+tabButtons.forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+showTab([...tabButtons].some(b => b.dataset.tab === location.hash.slice(1)) ? location.hash.slice(1) : 'time');
 </script>
 </body>
 </html>
