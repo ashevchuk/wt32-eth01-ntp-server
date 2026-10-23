@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "gnss.h"
 #include "settings.h"
 #include "ubx.h"
 
@@ -38,7 +39,9 @@
 
 #define PRT_PAYLOAD_SIZE 20
 #define PRT_PORT_UART1 1
+#define PRT_OFFSET_BAUD_RATE 8
 #define PRT_OFFSET_OUT_PROTOCOLS 14
+#define FACTORY_BAUD 9600
 #define PRT_PROTOCOL_UBX 0x0001
 
 #define CFG_MSG_REPLY_SIZE 8
@@ -215,6 +218,30 @@ static esp_err_t refresh_state(const pps_delay_settings_t *wanted, bool saved)
     return ESP_OK;
 }
 
+// A receiver with factory settings talks at FACTORY_BAUD; move it to GNSS_BAUD and keep that across restarts.
+// Returns ESP_OK when the receiver already answers at GNSS_BAUD or has been moved there.
+static esp_err_t ensure_baud(void)
+{
+    const uint8_t request[] = {PRT_PORT_UART1};
+    uint8_t port[PRT_PAYLOAD_SIZE];
+    size_t length;
+    if (ubx_poll(CLASS_CFG, ID_CFG_PRT, request, sizeof(request), port, sizeof(port), &length) == ESP_OK) {
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(gnss_set_baud(FACTORY_BAUD), TAG, "factory baud");
+    esp_err_t err = ubx_poll(CLASS_CFG, ID_CFG_PRT, request, sizeof(request), port, sizeof(port), &length);
+    if (err == ESP_OK && length == PRT_PAYLOAD_SIZE) {
+        put_u32(port + PRT_OFFSET_BAUD_RATE, GNSS_BAUD);
+        err = ubx_set(CLASS_CFG, ID_CFG_PRT, port, sizeof(port));
+    }
+    ESP_RETURN_ON_ERROR(gnss_set_baud(GNSS_BAUD), TAG, "restore baud");
+    ESP_RETURN_ON_ERROR(err, TAG, "move receiver to %d baud", GNSS_BAUD);
+    vTaskDelay(pdMS_TO_TICKS(PORT_RECONFIGURE_MS));
+    ESP_RETURN_ON_ERROR(save_to_receiver(), TAG, "save baud");
+    ESP_LOGW(TAG, "receiver moved from %d to %d baud", FACTORY_BAUD, GNSS_BAUD);
+    return ESP_OK;
+}
+
 static esp_err_t apply(bool *written)
 {
     pps_delay_settings_t wanted;
@@ -260,7 +287,10 @@ static void config_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(START_DELAY_MS));
     bool written;
-    const esp_err_t err = apply(&written);
+    esp_err_t err = ensure_baud();
+    if (err == ESP_OK) {
+        err = apply(&written);
+    }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "receiver not configured: %s (UBX input may be disabled on its UART)", esp_err_to_name(err));
     }

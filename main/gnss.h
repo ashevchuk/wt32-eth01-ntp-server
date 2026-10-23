@@ -29,6 +29,11 @@ typedef struct {
 
 void gnss_get_status(gnss_status_t *status);
 
+#define GNSS_BAUD 115200
+
+// Changes the speed of the receiver's UART on the ESP32 side only.
+esp_err_t gnss_set_baud(uint32_t baud);
+
 #define GNSS_MAX_SATELLITES 64
 #define GNSS_UNKNOWN (-1)
 

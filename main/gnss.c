@@ -22,7 +22,6 @@
 #define GNSS_TX_GPIO GPIO_NUM_17
 #define GNSS_RX_GPIO GPIO_NUM_5
 #define GNSS_PPS_GPIO GPIO_NUM_35
-#define GNSS_BAUD 115200
 #define UART_RX_BUFFER_SIZE 2048
 #define NMEA_MAX_LINE 128
 #define NMEA_MAX_FIELDS 24
@@ -546,6 +545,11 @@ static esp_err_t start_uart(void)
     ESP_RETURN_ON_ERROR(uart_driver_install(GNSS_UART, UART_RX_BUFFER_SIZE, 0, 0, NULL, 0), TAG, "uart install");
     ESP_RETURN_ON_ERROR(uart_param_config(GNSS_UART, &cfg), TAG, "uart config");
     return uart_set_pin(GNSS_UART, GNSS_TX_GPIO, GNSS_RX_GPIO, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+}
+
+esp_err_t gnss_set_baud(uint32_t baud)
+{
+    return uart_set_baudrate(GNSS_UART, baud);
 }
 
 static esp_err_t start_pps(void)
