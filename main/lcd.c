@@ -39,6 +39,7 @@ static const char *TAG = "lcd";
 
 static const uint8_t ROW_OFFSETS[LCD_ROWS] = {0x00, 0x40, 0x14, 0x54};
 
+static i2c_master_bus_handle_t lcd_bus;
 static i2c_master_dev_handle_t lcd_dev;
 
 static esp_err_t write_expander(uint8_t value)
@@ -117,6 +118,7 @@ static esp_err_t try_start(i2c_master_bus_handle_t bus)
 // The backpack and the controller can still be coming up when the firmware gets here, and the bus can glitch.
 esp_err_t lcd_start(i2c_master_bus_handle_t bus)
 {
+    lcd_bus = bus;
     esp_err_t err = ESP_FAIL;
     for (int attempt = 1; attempt <= START_ATTEMPTS; attempt++) {
         err = try_start(bus);
@@ -127,6 +129,12 @@ esp_err_t lcd_start(i2c_master_bus_handle_t bus)
         vTaskDelay(pdMS_TO_TICKS(START_RETRY_MS));
     }
     return err;
+}
+
+esp_err_t lcd_recover(void)
+{
+    ESP_RETURN_ON_FALSE(lcd_bus, ESP_ERR_INVALID_STATE, TAG, "bus not set");
+    return lcd_dev ? init_controller() : try_start(lcd_bus);
 }
 
 esp_err_t lcd_print(int row, const char *text)

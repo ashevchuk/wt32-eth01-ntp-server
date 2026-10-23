@@ -10,6 +10,10 @@
 #define LCD_ROWS 4
 
 esp_err_t lcd_start(i2c_master_bus_handle_t bus);
+// Brings the display back after a failed write: initialises the controller again, attaching the device first when
+// the start failed. A single attempt; the caller decides when to try again.
+esp_err_t lcd_recover(void);
+
 esp_err_t lcd_print(int row, const char *text);
 esp_err_t lcd_clear(void);
 

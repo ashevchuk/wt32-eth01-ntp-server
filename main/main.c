@@ -88,11 +88,9 @@ void app_main(void)
 
     i2c_master_bus_handle_t i2c_bus;
     if (started("i2c bus", i2c_bus_init(&i2c_bus))) {
-        const bool lcd_ready = started("lcd", lcd_start(i2c_bus));
+        started("lcd", lcd_start(i2c_bus));
         started("rtc", rtc_start(i2c_bus));
-        if (lcd_ready) {
-            started("clock display", bigclock_start());
-        }
+        started("clock display", bigclock_start());
     }
     started("ntp clock", ntp_clock_start());
     if (started("gnss", gnss_start(on_gnss_second))) {

@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 
 #include "lcd.h"
+#include "startup.h"
 #include "rtc.h"
 #include "settings.h"
 
@@ -73,6 +74,9 @@ static const uint8_t DIGIT_CELLS[10][DIGIT_HEIGHT][DIGIT_WIDTH] = {
     {{1, 2, 3}, {4, 5, 0}, {6, BLANK, 6}, {7, 2, BLANK}},
     {{1, 2, 3}, {4, 3, 6}, {BLANK, 1, BLANK}, {7, BLANK, BLANK}},
 };
+
+// A failed display is re-initialised no more often than this.
+#define RECOVER_INTERVAL_MS 2000
 
 enum screen_state { SCREEN_BLANK, SCREEN_WAITING, SCREEN_CLOCK };
 enum clock_face { FACE_BIG, FACE_BIG_DATE, FACE_TEXT, FACE_COUNT };
@@ -215,29 +219,47 @@ static void clock_task(void *arg)
     char shown_text[TEXT_LINE_COUNT][LCD_COLUMNS + 1] = {{0}};
     char shown_date[DATE_LINE_COUNT][DATE_LINE_SIZE] = {{0}};
     bool colons_shown = false;
+    bool display_ready = false;
+    int64_t last_recover_us = 0;
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_add(NULL));
     while (true) {
         esp_task_wdt_reset();
+        if (!display_ready) {
+            if (esp_timer_get_time() - last_recover_us >= RECOVER_INTERVAL_MS * 1000LL) {
+                last_recover_us = esp_timer_get_time();
+                display_ready = lcd_recover() == ESP_OK && define_glyphs() == ESP_OK;
+                if (display_ready) {
+                    startup_recovered("lcd");
+                    state = SCREEN_BLANK;
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
+            continue;
+        }
         struct tm utc;
         esp_err_t err = rtc_read(&utc);
+        esp_err_t drawn = ESP_OK;
         if (err == ESP_ERR_INVALID_STATE && state != SCREEN_WAITING) {
-            ESP_ERROR_CHECK_WITHOUT_ABORT(lcd_clear());
-            ESP_ERROR_CHECK_WITHOUT_ABORT(lcd_print(1, "  Waiting for time"));
-            state = SCREEN_WAITING;
+            drawn = lcd_clear();
+            if (drawn == ESP_OK) {
+                drawn = lcd_print(1, "  Waiting for time");
+            }
+            if (drawn == ESP_OK) {
+                state = SCREEN_WAITING;
+            }
         } else if (err == ESP_OK) {
             const enum clock_face face = choose_face();
             const bool force = state != SCREEN_CLOCK || face != shown_face;
             if (force) {
-                ESP_ERROR_CHECK_WITHOUT_ABORT(lcd_clear());
+                drawn = lcd_clear();
             }
             const time_t seconds = timegm(&utc);
             struct tm local;
             localtime_r(&seconds, &local);
-            esp_err_t drawn;
-            if (face == FACE_TEXT) {
+            if (drawn == ESP_OK && face == FACE_TEXT) {
                 drawn = show_text(&local, shown_text, force);
-            } else {
+            } else if (drawn == ESP_OK) {
                 drawn = show_clock(&local, shown, &colons_shown, force, face == FACE_BIG);
                 if (drawn == ESP_OK && face == FACE_BIG_DATE) {
                     drawn = show_date(&local, shown_date, force);
@@ -247,6 +269,10 @@ static void clock_task(void *arg)
                 state = SCREEN_CLOCK;
                 shown_face = face;
             }
+        }
+        if (drawn != ESP_OK) {
+            ESP_LOGW(TAG, "display write failed: %s", esp_err_to_name(drawn));
+            display_ready = false;
         }
         vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
     }
@@ -271,7 +297,6 @@ esp_err_t bigclock_set_display(const display_settings_t *requested)
 esp_err_t bigclock_start(void)
 {
     ESP_ERROR_CHECK_WITHOUT_ABORT(settings_load_display(&display));
-    ESP_RETURN_ON_ERROR(define_glyphs(), TAG, "glyphs");
     ESP_RETURN_ON_FALSE(xTaskCreate(clock_task, "bigclock", 4096, NULL, 4, NULL) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "task");
     return ESP_OK;
