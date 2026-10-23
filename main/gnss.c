@@ -47,6 +47,19 @@
 #define UBX_ID_NAV_PVT 0x07
 #define UBX_ID_NAV_SAT 0x35
 #define UBX_ID_MON_HW 0x09
+#define UBX_ID_MON_VER 0x04
+#define UBX_ID_NAV_STATUS 0x03
+#define VER_SOFTWARE_SIZE 30
+#define VER_HARDWARE_SIZE 10
+#define VER_EXTENSION_SIZE 30
+#define VER_PROTOCOL_PREFIX "PROTVER"
+#define VER_PROTOCOL_SEPARATOR_SIZE 1
+#define STATUS_PAYLOAD_SIZE 16
+#define STATUS_OFFSET_TTFF 8
+#define STATUS_OFFSET_UPTIME 12
+#define STATUS_OFFSET_FLAGS2 7
+#define STATUS_FLAGS2_SPOOFING_SHIFT 3
+#define STATUS_FLAGS2_SPOOFING_MASK 0x03
 #define NAV_SAT_HEADER_SIZE 8
 #define NAV_SAT_OFFSET_COUNT 5
 #define NAV_SAT_ENTRY_SIZE 12
@@ -118,6 +131,9 @@ static gnss_pvt_t pvt_state;
 static int64_t pvt_updated_us;
 static gnss_hardware_t hardware_state;
 static int64_t hardware_updated_us;
+
+static gnss_module_t module_state;
+static int64_t module_status_updated_us;
 
 static gnss_pps_t pps_stats;
 static int64_t last_pps_us;
@@ -411,6 +427,52 @@ static void handle_mon_hw(const uint8_t *payload, size_t length)
     portEXIT_CRITICAL(&status_lock);
 }
 
+static void copy_field(char *out, size_t out_size, const uint8_t *field, size_t field_size)
+{
+    const size_t length = strnlen((const char *)field, field_size);
+    const size_t copied = length < out_size - 1 ? length : out_size - 1;
+    memcpy(out, field, copied);
+    out[copied] = '\0';
+}
+
+static void handle_mon_ver(const uint8_t *payload, size_t length)
+{
+    if (length < VER_SOFTWARE_SIZE + VER_HARDWARE_SIZE) {
+        return;
+    }
+    gnss_module_t version = {0};
+    copy_field(version.software, sizeof(version.software), payload, VER_SOFTWARE_SIZE);
+    copy_field(version.hardware, sizeof(version.hardware), payload + VER_SOFTWARE_SIZE, VER_HARDWARE_SIZE);
+    const size_t prefix_length = strlen(VER_PROTOCOL_PREFIX);
+    for (size_t offset = VER_SOFTWARE_SIZE + VER_HARDWARE_SIZE; offset + VER_EXTENSION_SIZE <= length;
+         offset += VER_EXTENSION_SIZE) {
+        if (strncmp((const char *)payload + offset, VER_PROTOCOL_PREFIX, prefix_length) == 0) {
+            const size_t value_offset = prefix_length + VER_PROTOCOL_SEPARATOR_SIZE;
+            copy_field(version.protocol, sizeof(version.protocol), payload + offset + value_offset,
+                       VER_EXTENSION_SIZE - value_offset);
+        }
+    }
+    portENTER_CRITICAL(&status_lock);
+    memcpy(module_state.software, version.software, sizeof(version.software));
+    memcpy(module_state.hardware, version.hardware, sizeof(version.hardware));
+    memcpy(module_state.protocol, version.protocol, sizeof(version.protocol));
+    portEXIT_CRITICAL(&status_lock);
+}
+
+static void handle_nav_status(const uint8_t *payload, size_t length)
+{
+    if (length < STATUS_PAYLOAD_SIZE) {
+        return;
+    }
+    portENTER_CRITICAL(&status_lock);
+    module_state.ttff_ms = read_u32(payload + STATUS_OFFSET_TTFF);
+    module_state.uptime_ms = read_u32(payload + STATUS_OFFSET_UPTIME);
+    module_state.spoofing_state =
+        (payload[STATUS_OFFSET_FLAGS2] >> STATUS_FLAGS2_SPOOFING_SHIFT) & STATUS_FLAGS2_SPOOFING_MASK;
+    module_status_updated_us = esp_timer_get_time();
+    portEXIT_CRITICAL(&status_lock);
+}
+
 static void on_ubx_message(uint8_t cls, uint8_t id, const uint8_t *payload, size_t length)
 {
     if (cls == UBX_CLASS_NAV && id == UBX_ID_NAV_SAT) {
@@ -419,6 +481,10 @@ static void on_ubx_message(uint8_t cls, uint8_t id, const uint8_t *payload, size
         handle_nav_pvt(payload, length);
     } else if (cls == UBX_CLASS_MON && id == UBX_ID_MON_HW) {
         handle_mon_hw(payload, length);
+    } else if (cls == UBX_CLASS_MON && id == UBX_ID_MON_VER) {
+        handle_mon_ver(payload, length);
+    } else if (cls == UBX_CLASS_NAV && id == UBX_ID_NAV_STATUS) {
+        handle_nav_status(payload, length);
     }
 }
 
@@ -490,6 +556,14 @@ void gnss_get_pvt(gnss_pvt_t *pvt)
     pvt->known = pvt_updated_us && esp_timer_get_time() - pvt_updated_us < UBX_MESSAGE_STALE_US;
     portEXIT_CRITICAL(&status_lock);
     pvt->time_trusted = pvt_allows_time(pvt);
+}
+
+void gnss_get_module(gnss_module_t *module)
+{
+    portENTER_CRITICAL(&status_lock);
+    *module = module_state;
+    module->status_known = module_status_updated_us && esp_timer_get_time() - module_status_updated_us < UBX_MESSAGE_STALE_US;
+    portEXIT_CRITICAL(&status_lock);
 }
 
 void gnss_get_hardware(gnss_hardware_t *hardware)

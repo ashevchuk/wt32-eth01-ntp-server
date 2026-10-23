@@ -37,7 +37,7 @@
 #include "upstream.h"
 #include "wifi.h"
 
-#define STATUS_BUFFER_SIZE 2048
+#define STATUS_BUFFER_SIZE 3072
 #define MICROS_PER_SECOND 1000000LL
 #define ETH_NETIF_KEY "ETH_DEF"
 #define MAC_LENGTH 6
@@ -195,9 +195,16 @@ static void write_gnss(struct json_out *out)
     gnss_hardware_t hardware;
     gnss_get_hardware(&hardware);
     json_printf(out, "\"hardware\":{\"known\":%s,\"antenna\":%u,\"jamming_state\":%u,\"jamming_indicator\":%u,"
-                     "\"agc_percent\":%.1f,\"noise\":%u}}",
+                     "\"agc_percent\":%.1f,\"noise\":%u},",
                 hardware.known ? "true" : "false", hardware.antenna_status, hardware.jamming_state,
                 hardware.jamming_indicator, hardware.agc_percent, hardware.noise_per_ms);
+
+    gnss_module_t module;
+    gnss_get_module(&module);
+    json_printf(out, "\"module\":{\"software\":\"%s\",\"hardware\":\"%s\",\"protocol\":\"%s\","
+                     "\"status_known\":%s,\"ttff_ms\":%lu,\"uptime_ms\":%lu,\"spoofing\":%u}}",
+                module.software, module.hardware, module.protocol, module.status_known ? "true" : "false",
+                (unsigned long)module.ttff_ms, (unsigned long)module.uptime_ms, module.spoofing_state);
 }
 
 static void json_string(struct json_out *out, const char *text)

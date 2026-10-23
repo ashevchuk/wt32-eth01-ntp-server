@@ -148,6 +148,10 @@ progress { width: 100%; }
             <dt>Antenna</dt><dd id="rx-antenna">-</dd>
             <dt title="Continuous-wave interference indicator, 0 none to 255 strong">Interference</dt><dd id="rx-jamming">-</dd>
             <dt title="Receiver gain control level">AGC</dt><dd id="rx-agc">-</dd>
+            <dt title="Receiver firmware, hardware and protocol version (UBX-MON-VER)">Receiver</dt><dd id="rx-version">-</dd>
+            <dt title="Time since the receiver itself started; it drops when the receiver resets without the ESP32">Receiver uptime</dt><dd id="rx-uptime">-</dd>
+            <dt title="The receiver's own spoofing detection; only protocol 18 and later reports it">Spoofing</dt><dd id="rx-spoofing">-</dd>
+            <dt title="Time from the receiver's start to its first fix">Time to first fix</dt><dd id="rx-ttff">-</dd>
           </dl>
           <dl class="pps">
             <dt>PPS</dt><dd id="pps-state">-</dd>
@@ -803,14 +807,26 @@ function renderSignals(data) {
 }
 
 const ANTENNA = { 0: "initialising", 1: "unknown", 2: "ok", 3: "short circuit", 4: "open circuit" };
+const SPOOFING = { 1: "none indicated", 2: "indicated", 3: "several indications" };
 const JAMMING = { 0: "", 1: "ok", 2: "warning", 3: "critical" };
 function formatNanoseconds(ns) {
   if (ns >= 1e6) return (ns / 1e6).toFixed(1) + " ms";
   if (ns >= 1e3) return (ns / 1e3).toFixed(1) + " \u00b5s";
   return ns + " ns";
 }
+function formatDuration(ms) {
+  const s = Math.round(ms / 1000);
+  if (s >= 3600) return Math.floor(s / 3600) + " h " + Math.floor(s % 3600 / 60) + " min";
+  if (s >= 60) return Math.floor(s / 60) + " min " + (s % 60) + " s";
+  return s + " s";
+}
 function renderReceiver(g) {
-  const pvt = g.pvt, hw = g.hardware;
+  const pvt = g.pvt, hw = g.hardware, mod = g.module;
+  set("rx-version", mod.software ? mod.software + ", " + mod.hardware + (mod.protocol ? ", protocol " + mod.protocol : "") : "-");
+  set("rx-uptime", mod.status_known ? formatDuration(mod.uptime_ms) : "-");
+  set("rx-spoofing", mod.status_known && SPOOFING[mod.spoofing] ? SPOOFING[mod.spoofing] : "unknown",
+      mod.spoofing === 1 ? "ok" : mod.spoofing >= 2 ? "bad" : "");
+  set("rx-ttff", mod.status_known && mod.ttff_ms ? formatDuration(mod.ttff_ms) : "-");
   if (!pvt.known) {
     set("rx-time-source", "no UBX data", "warn");
     set("rx-time-accuracy", "-");

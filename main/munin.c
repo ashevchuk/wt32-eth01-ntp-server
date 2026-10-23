@@ -158,6 +158,17 @@ static int fetch_jamming_state(char *out, size_t size)
     return snprintf(out, size, "state.value %u\n", hardware.jamming_state);
 }
 
+static int fetch_spoofing(char *out, size_t size)
+{
+    gnss_module_t module;
+    gnss_get_module(&module);
+    // 0 means unknown or not supported by this protocol version, so it is not a reading.
+    if (!module.status_known || module.spoofing_state == 0) {
+        return snprintf(out, size, "state.value " NO_VALUE "\n");
+    }
+    return snprintf(out, size, "state.value %u\n", module.spoofing_state);
+}
+
 static const struct builtin_plugin builtin_plugins[] = {
     {"gnss_satellites",
      "graph_title GNSS satellites\n"
@@ -227,6 +238,16 @@ static const struct builtin_plugin builtin_plugins[] = {
      "state.warning :1\n"
      "state.critical :2\n",
      fetch_jamming_state},
+    {"gnss_spoofing",
+     "graph_title GNSS spoofing detection\n"
+     "graph_vlabel 1 none, 2 indicated, 3 several\n"
+     "graph_category gnss\n"
+     "graph_args --base 1000 --lower-limit 0 --upper-limit 3\n"
+     "state.label Verdict of the spoofing detection\n"
+     "state.info Heuristic of the receiver, not a guarantee; unknown on protocol 15\n"
+     "state.warning :1\n"
+     "state.critical :2\n",
+     fetch_spoofing},
     {"gnss_agc",
      "graph_title GNSS receiver AGC\n"
      "graph_vlabel percent\n"

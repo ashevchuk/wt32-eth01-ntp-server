@@ -88,6 +88,22 @@ typedef struct {
 
 void gnss_get_hardware(gnss_hardware_t *hardware);
 
+// UBX-MON-VER (asked once after boot) and UBX-NAV-STATUS. The version strings are empty until the receiver has
+// answered. ttff_ms is 0 until the first fix; uptime_ms counts from the receiver's own start, so it drops when
+// the receiver resets by itself. spoofing_state is the receiver's spoofing detection (0 unknown or not supported,
+// 1 none indicated, 2 indicated, 3 several indications), reported by protocol 18 and later. status_known is false when no NAV-STATUS arrived in the last seconds.
+typedef struct {
+    char software[31];
+    char hardware[11];
+    char protocol[8];
+    bool status_known;
+    uint32_t ttff_ms;
+    uint32_t uptime_ms;
+    uint8_t spoofing_state;
+} gnss_module_t;
+
+void gnss_get_module(gnss_module_t *module);
+
 // Statistics of the intervals between PPS pulses on the esp_timer clock over the last minute.
 typedef struct {
     bool present;

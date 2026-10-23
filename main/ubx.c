@@ -171,6 +171,14 @@ esp_err_t ubx_poll(uint8_t cls, uint8_t id, const uint8_t *payload, size_t lengt
     return result;
 }
 
+esp_err_t ubx_request(uint8_t cls, uint8_t id)
+{
+    xSemaphoreTake(transaction_lock, portMAX_DELAY);
+    const esp_err_t result = send_message(cls, id, NULL, 0);
+    xSemaphoreGive(transaction_lock);
+    return result;
+}
+
 esp_err_t ubx_set(uint8_t cls, uint8_t id, const uint8_t *payload, size_t length)
 {
     xSemaphoreTake(transaction_lock, portMAX_DELAY);

@@ -32,6 +32,8 @@
 #define INIT_STEP_DELAY_US 5000
 #define INIT_NIBBLE_8BIT 0x3
 #define INIT_NIBBLE_4BIT 0x2
+#define START_ATTEMPTS 5
+#define START_RETRY_MS 300
 
 static const char *TAG = "lcd";
 
@@ -92,7 +94,7 @@ static esp_err_t init_controller(void)
     return write_command(CMD_ENTRY_MODE_INCREMENT);
 }
 
-esp_err_t lcd_start(i2c_master_bus_handle_t bus)
+static esp_err_t try_start(i2c_master_bus_handle_t bus)
 {
     uint16_t address;
     ESP_RETURN_ON_ERROR(find_address(bus, &address), TAG, "no PCF8574 at 0x27 or 0x3F");
@@ -104,7 +106,27 @@ esp_err_t lcd_start(i2c_master_bus_handle_t bus)
         .scl_speed_hz = I2C_CLOCK_HZ,
     };
     ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(bus, &cfg, &lcd_dev), TAG, "add device");
-    return init_controller();
+    const esp_err_t err = init_controller();
+    if (err != ESP_OK) {
+        i2c_master_bus_rm_device(lcd_dev);
+        lcd_dev = NULL;
+    }
+    return err;
+}
+
+// The backpack and the controller can still be coming up when the firmware gets here, and the bus can glitch.
+esp_err_t lcd_start(i2c_master_bus_handle_t bus)
+{
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 1; attempt <= START_ATTEMPTS; attempt++) {
+        err = try_start(bus);
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "start attempt %d of %d failed: %s", attempt, START_ATTEMPTS, esp_err_to_name(err));
+        vTaskDelay(pdMS_TO_TICKS(START_RETRY_MS));
+    }
+    return err;
 }
 
 esp_err_t lcd_print(int row, const char *text)

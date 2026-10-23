@@ -12,12 +12,17 @@
 #include "ubx.h"
 
 #define CLASS_CFG 0x06
+#define CLASS_MON 0x0A
+#define ID_MON_VER 0x04
 #define ID_CFG_NAV5 0x24
 #define ID_CFG_TP5 0x31
 #define ID_CFG_CFG 0x09
 #define ID_CFG_MSG 0x01
 #define ID_CFG_PRT 0x00
 #define ID_CFG_ITFM 0x39
+#define ID_CFG_RATE 0x08
+#define ID_CFG_NMEA 0x17
+#define ID_CFG_GNSS 0x3E
 
 #define NAV5_PAYLOAD_SIZE 36
 #define NAV5_MASK_DYNMODEL 0x0001
@@ -27,8 +32,37 @@
 
 #define TP5_PAYLOAD_SIZE 32
 #define TP5_TIME_PULSE_INDEX 0
+#define TP5_OFFSET_PERIOD 8
+#define TP5_OFFSET_PERIOD_LOCKED 12
+#define TP5_OFFSET_LENGTH_LOCKED 20
+#define TP5_OFFSET_FLAGS 28
 #define TP5_OFFSET_CABLE_DELAY 4
 #define TP5_OFFSET_USER_DELAY 24
+
+// One pulse per second, 100 ms long once locked, rising edge on the UTC second, absent while the receiver is
+// not locked to GNSS time.
+#define TP5_PERIOD_US 1000000
+#define TP5_PULSE_LENGTH_US 100000
+#define TP5_FLAGS_MASK 0x07FF
+#define TP5_FLAGS_WANTED 0x0077
+
+#define RATE_PAYLOAD_SIZE 6
+#define RATE_MEASUREMENT_MS 1000
+#define RATE_SOLUTIONS_PER_MEASUREMENT 1
+
+#define NMEA_VERSION_OFFSET 1
+#define NMEA_VERSION_4_0 0x40
+#define NMEA_MAX_PAYLOAD_SIZE 20
+
+#define GNSS_HEADER_SIZE 4
+#define GNSS_OFFSET_BLOCK_COUNT 3
+#define GNSS_BLOCK_SIZE 8
+#define GNSS_BLOCK_OFFSET_ID 0
+#define GNSS_BLOCK_OFFSET_FLAGS 4
+#define GNSS_ID_GALILEO 2
+#define GNSS_FLAG_ENABLE 0x00000001u
+#define GNSS_SIGNALS_MASK 0x00FF0000u
+#define GNSS_SIGNAL_GALILEO_E1 0x00010000u
 
 #define ITFM_PAYLOAD_SIZE 8
 #define ITFM_ENABLE (1u << 31)
@@ -41,8 +75,8 @@
 #define PRT_PORT_UART1 1
 #define PRT_OFFSET_BAUD_RATE 8
 #define PRT_OFFSET_OUT_PROTOCOLS 14
-#define FACTORY_BAUD 9600
 #define PRT_PROTOCOL_UBX 0x0001
+#define PRT_PROTOCOL_NMEA 0x0002
 
 #define CFG_MSG_REPLY_SIZE 8
 #define CFG_MSG_OFFSET_UART1_RATE 3
@@ -56,6 +90,7 @@
 #define START_DELAY_MS 3000
 // The receiver needs a moment to apply a changed port setup before it answers again.
 #define PORT_RECONFIGURE_MS 300
+#define GNSS_RESTART_MS 1000
 #define TASK_STACK_SIZE 4096
 #define TASK_PRIORITY 3
 
@@ -130,6 +165,7 @@ static esp_err_t ensure_interference_monitor(bool *changed)
 }
 
 // Periodic UBX messages are only sent on a port that has UBX enabled for output; polls are answered either way.
+// NMEA output is needed for the sentences below.
 static esp_err_t ensure_ubx_output(bool *changed)
 {
     const uint8_t request[] = {PRT_PORT_UART1};
@@ -139,8 +175,9 @@ static esp_err_t ensure_ubx_output(bool *changed)
                         "read port");
     ESP_RETURN_ON_FALSE(length == PRT_PAYLOAD_SIZE, ESP_ERR_INVALID_SIZE, TAG, "port reply");
     const uint16_t protocols = get_u16(port + PRT_OFFSET_OUT_PROTOCOLS);
-    if (!(protocols & PRT_PROTOCOL_UBX)) {
-        put_u16(port + PRT_OFFSET_OUT_PROTOCOLS, protocols | PRT_PROTOCOL_UBX);
+    const uint16_t wanted = PRT_PROTOCOL_UBX | PRT_PROTOCOL_NMEA;
+    if ((protocols & wanted) != wanted) {
+        put_u16(port + PRT_OFFSET_OUT_PROTOCOLS, protocols | wanted);
         ESP_RETURN_ON_ERROR(ubx_set(CLASS_CFG, ID_CFG_PRT, port, sizeof(port)), TAG, "write port");
         vTaskDelay(pdMS_TO_TICKS(PORT_RECONFIGURE_MS));
         *changed = true;
@@ -149,11 +186,13 @@ static esp_err_t ensure_ubx_output(bool *changed)
 }
 
 // The receiver sends these once per navigation solution on this UART: satellites (UBX-NAV-SAT), time and fix
-// validity (UBX-NAV-PVT) and the antenna and interference monitor (UBX-MON-HW).
+// validity (UBX-NAV-PVT), the antenna and interference monitor (UBX-MON-HW) and its start-up state (UBX-NAV-STATUS),
+// plus the NMEA sentences GGA, GSA, GSV and RMC that gnss.c parses.
 static const struct {
     uint8_t cls;
     uint8_t id;
-} PERIODIC_MESSAGES[] = {{0x01, 0x35}, {0x01, 0x07}, {0x0A, 0x09}};
+} PERIODIC_MESSAGES[] = {{0x01, 0x35}, {0x01, 0x07}, {0x0A, 0x09}, {0x01, 0x03},
+                                                                    {0xF0, 0x00}, {0xF0, 0x02}, {0xF0, 0x03}, {0xF0, 0x04}};
 
 static esp_err_t ensure_periodic_messages(bool *changed)
 {
@@ -169,6 +208,55 @@ static esp_err_t ensure_periodic_messages(bool *changed)
             ESP_RETURN_ON_ERROR(ubx_set(CLASS_CFG, ID_CFG_MSG, set, sizeof(set)), TAG, "write message rate");
             *changed = true;
         }
+    }
+    return ESP_OK;
+}
+
+static esp_err_t ensure_time_pulse(bool *changed)
+{
+    uint8_t tp5[TP5_PAYLOAD_SIZE];
+    ESP_RETURN_ON_ERROR(poll_tp5(tp5), TAG, "read TP5");
+    const uint32_t flags = get_u32(tp5 + TP5_OFFSET_FLAGS);
+    if ((flags & TP5_FLAGS_MASK) == TP5_FLAGS_WANTED && get_u32(tp5 + TP5_OFFSET_PERIOD) == TP5_PERIOD_US
+        && get_u32(tp5 + TP5_OFFSET_PERIOD_LOCKED) == TP5_PERIOD_US
+        && get_u32(tp5 + TP5_OFFSET_LENGTH_LOCKED) == TP5_PULSE_LENGTH_US) {
+        return ESP_OK;
+    }
+    put_u32(tp5 + TP5_OFFSET_PERIOD, TP5_PERIOD_US);
+    put_u32(tp5 + TP5_OFFSET_PERIOD_LOCKED, TP5_PERIOD_US);
+    put_u32(tp5 + TP5_OFFSET_LENGTH_LOCKED, TP5_PULSE_LENGTH_US);
+    put_u32(tp5 + TP5_OFFSET_FLAGS, (flags & ~(uint32_t)TP5_FLAGS_MASK) | TP5_FLAGS_WANTED);
+    ESP_RETURN_ON_ERROR(ubx_set(CLASS_CFG, ID_CFG_TP5, tp5, sizeof(tp5)), TAG, "write time pulse");
+    *changed = true;
+    return ESP_OK;
+}
+
+static esp_err_t ensure_solution_rate(bool *changed)
+{
+    uint8_t rate[RATE_PAYLOAD_SIZE];
+    size_t length;
+    ESP_RETURN_ON_ERROR(ubx_poll(CLASS_CFG, ID_CFG_RATE, NULL, 0, rate, sizeof(rate), &length), TAG, "read rate");
+    ESP_RETURN_ON_FALSE(length == RATE_PAYLOAD_SIZE, ESP_ERR_INVALID_SIZE, TAG, "rate reply");
+    if (get_u16(rate) != RATE_MEASUREMENT_MS || get_u16(rate + 2) != RATE_SOLUTIONS_PER_MEASUREMENT) {
+        put_u16(rate, RATE_MEASUREMENT_MS);
+        put_u16(rate + 2, RATE_SOLUTIONS_PER_MEASUREMENT);
+        ESP_RETURN_ON_ERROR(ubx_set(CLASS_CFG, ID_CFG_RATE, rate, sizeof(rate)), TAG, "write rate");
+        *changed = true;
+    }
+    return ESP_OK;
+}
+
+// The sentence parser knows the numbering and talker IDs of NMEA 4.0 only.
+static esp_err_t ensure_nmea_version(bool *changed)
+{
+    uint8_t nmea[NMEA_MAX_PAYLOAD_SIZE];
+    size_t length;
+    ESP_RETURN_ON_ERROR(ubx_poll(CLASS_CFG, ID_CFG_NMEA, NULL, 0, nmea, sizeof(nmea), &length), TAG, "read NMEA");
+    ESP_RETURN_ON_FALSE(length > NMEA_VERSION_OFFSET, ESP_ERR_INVALID_SIZE, TAG, "NMEA reply");
+    if (nmea[NMEA_VERSION_OFFSET] != NMEA_VERSION_4_0) {
+        nmea[NMEA_VERSION_OFFSET] = NMEA_VERSION_4_0;
+        ESP_RETURN_ON_ERROR(ubx_set(CLASS_CFG, ID_CFG_NMEA, nmea, length), TAG, "write NMEA");
+        *changed = true;
     }
     return ESP_OK;
 }
@@ -189,6 +277,35 @@ static esp_err_t ensure_delays(const pps_delay_settings_t *wanted, bool *changed
         *changed = true;
     }
     return ESP_OK;
+}
+
+// Galileo is off in the receiver's defaults. Changing the constellations restarts the receiver's GNSS subsystem.
+static esp_err_t ensure_galileo(bool *changed)
+{
+    uint8_t gnss[UBX_MAX_PAYLOAD];
+    size_t length;
+    ESP_RETURN_ON_ERROR(ubx_poll(CLASS_CFG, ID_CFG_GNSS, NULL, 0, gnss, sizeof(gnss), &length), TAG, "read GNSS");
+    ESP_RETURN_ON_FALSE(length >= GNSS_HEADER_SIZE
+                            && length == GNSS_HEADER_SIZE + (size_t)gnss[GNSS_OFFSET_BLOCK_COUNT] * GNSS_BLOCK_SIZE,
+                        ESP_ERR_INVALID_SIZE, TAG, "GNSS reply");
+    for (size_t offset = GNSS_HEADER_SIZE; offset < length; offset += GNSS_BLOCK_SIZE) {
+        if (gnss[offset + GNSS_BLOCK_OFFSET_ID] != GNSS_ID_GALILEO) {
+            continue;
+        }
+        uint32_t flags = get_u32(gnss + offset + GNSS_BLOCK_OFFSET_FLAGS);
+        if (flags & GNSS_FLAG_ENABLE) {
+            return ESP_OK;
+        }
+        if (!(flags & GNSS_SIGNALS_MASK)) {
+            flags |= GNSS_SIGNAL_GALILEO_E1;
+        }
+        put_u32(gnss + offset + GNSS_BLOCK_OFFSET_FLAGS, flags | GNSS_FLAG_ENABLE);
+        ESP_RETURN_ON_ERROR(ubx_set(CLASS_CFG, ID_CFG_GNSS, gnss, length), TAG, "write GNSS");
+        vTaskDelay(pdMS_TO_TICKS(GNSS_RESTART_MS));
+        *changed = true;
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_FOUND;
 }
 
 // Persisting costs flash cycles in the receiver, so it only happens after an actual change.
@@ -218,7 +335,9 @@ static esp_err_t refresh_state(const pps_delay_settings_t *wanted, bool saved)
     return ESP_OK;
 }
 
-// A receiver with factory settings talks at FACTORY_BAUD; move it to GNSS_BAUD and keep that across restarts.
+// Speeds a receiver may be left at, factory 9600 first. The one it answers at is changed to GNSS_BAUD and kept.
+static const uint32_t PROBE_BAUDS[] = {9600, 38400, 57600, 19200, 4800, 230400, 460800};
+
 // Returns ESP_OK when the receiver already answers at GNSS_BAUD or has been moved there.
 static esp_err_t ensure_baud(void)
 {
@@ -228,18 +347,22 @@ static esp_err_t ensure_baud(void)
     if (ubx_poll(CLASS_CFG, ID_CFG_PRT, request, sizeof(request), port, sizeof(port), &length) == ESP_OK) {
         return ESP_OK;
     }
-    ESP_RETURN_ON_ERROR(gnss_set_baud(FACTORY_BAUD), TAG, "factory baud");
-    esp_err_t err = ubx_poll(CLASS_CFG, ID_CFG_PRT, request, sizeof(request), port, sizeof(port), &length);
-    if (err == ESP_OK && length == PRT_PAYLOAD_SIZE) {
-        put_u32(port + PRT_OFFSET_BAUD_RATE, GNSS_BAUD);
-        err = ubx_set(CLASS_CFG, ID_CFG_PRT, port, sizeof(port));
+    for (size_t i = 0; i < sizeof(PROBE_BAUDS) / sizeof(PROBE_BAUDS[0]); i++) {
+        ESP_RETURN_ON_ERROR(gnss_set_baud(PROBE_BAUDS[i]), TAG, "probe baud");
+        esp_err_t err = ubx_poll(CLASS_CFG, ID_CFG_PRT, request, sizeof(request), port, sizeof(port), &length);
+        if (err == ESP_OK && length == PRT_PAYLOAD_SIZE) {
+            put_u32(port + PRT_OFFSET_BAUD_RATE, GNSS_BAUD);
+            err = ubx_set(CLASS_CFG, ID_CFG_PRT, port, sizeof(port));
+            ESP_RETURN_ON_ERROR(gnss_set_baud(GNSS_BAUD), TAG, "restore baud");
+            ESP_RETURN_ON_ERROR(err, TAG, "move receiver to %d baud", GNSS_BAUD);
+            vTaskDelay(pdMS_TO_TICKS(PORT_RECONFIGURE_MS));
+            ESP_RETURN_ON_ERROR(save_to_receiver(), TAG, "save baud");
+            ESP_LOGW(TAG, "receiver moved from %lu to %d baud", (unsigned long)PROBE_BAUDS[i], GNSS_BAUD);
+            return ESP_OK;
+        }
     }
-    ESP_RETURN_ON_ERROR(gnss_set_baud(GNSS_BAUD), TAG, "restore baud");
-    ESP_RETURN_ON_ERROR(err, TAG, "move receiver to %d baud", GNSS_BAUD);
-    vTaskDelay(pdMS_TO_TICKS(PORT_RECONFIGURE_MS));
-    ESP_RETURN_ON_ERROR(save_to_receiver(), TAG, "save baud");
-    ESP_LOGW(TAG, "receiver moved from %d to %d baud", FACTORY_BAUD, GNSS_BAUD);
-    return ESP_OK;
+    gnss_set_baud(GNSS_BAUD);
+    return ESP_ERR_NOT_FOUND;
 }
 
 static esp_err_t apply(bool *written)
@@ -249,10 +372,14 @@ static esp_err_t apply(bool *written)
 
     bool changed = false;
     ESP_RETURN_ON_ERROR(ensure_stationary(&changed), TAG, "dynamic model");
+    ESP_RETURN_ON_ERROR(ensure_time_pulse(&changed), TAG, "time pulse");
     ESP_RETURN_ON_ERROR(ensure_delays(&wanted, &changed), TAG, "delays");
+    ESP_RETURN_ON_ERROR(ensure_solution_rate(&changed), TAG, "solution rate");
+    ESP_RETURN_ON_ERROR(ensure_nmea_version(&changed), TAG, "NMEA version");
     ESP_RETURN_ON_ERROR(ensure_ubx_output(&changed), TAG, "ubx output");
     ESP_RETURN_ON_ERROR(ensure_periodic_messages(&changed), TAG, "periodic messages");
     ESP_RETURN_ON_ERROR(ensure_interference_monitor(&changed), TAG, "interference monitor");
+    ESP_RETURN_ON_ERROR(ensure_galileo(&changed), TAG, "Galileo");
 
     bool saved = false;
     *written = changed;
@@ -290,6 +417,9 @@ static void config_task(void *arg)
     esp_err_t err = ensure_baud();
     if (err == ESP_OK) {
         err = apply(&written);
+    }
+    if (err == ESP_OK) {
+        ubx_request(CLASS_MON, ID_MON_VER);
     }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "receiver not configured: %s (UBX input may be disabled on its UART)", esp_err_to_name(err));
