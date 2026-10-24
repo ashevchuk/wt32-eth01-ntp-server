@@ -1,5 +1,7 @@
 # NTP server on WT32-ETH01
 
+<img width="1450" height="752" alt="screenshot_20261024_030754" src="https://github.com/user-attachments/assets/376d6981-1f27-4b7e-a2f5-1414e79b8101" />
+
 Stratum 1 NTP server for the WT32-ETH01 (ESP32, wired Ethernet), disciplined by a u-blox M8N GNSS receiver with a PPS output and backed by a DS3231M RTC. A 20x4 LCD shows the local time, DS18B20 sensors report temperature to Munin, and a web interface covers status, settings and firmware updates.
 
 ## Pinout
