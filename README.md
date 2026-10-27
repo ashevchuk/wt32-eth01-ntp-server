@@ -71,11 +71,11 @@ The RTC and the backpack share the same two wires. Both need pull-ups on SDA and
 ### DS18B20 temperature sensors
 
 ```
-3V3 ----+------------+------------ VDD  (every sensor)
-        |            |
-       4.7k          |
-        |            |
-IO4 ----+------------+------------ DQ   (every sensor)
+3V3 ----+------------------------- VDD  (every sensor)
+        |             
+       4.7k           
+        |             
+IO4 ----+------------------------- DQ   (every sensor)
 
 GND ------------------------------ GND  (every sensor)
 ```
