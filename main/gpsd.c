@@ -173,6 +173,11 @@ static size_t build_tpv(void)
         }
         append(&length, ",\"speed\":%.3f,\"track\":%.1f", (double)(status.speed_kmh / KMH_PER_MS),
                (double)status.course_deg);
+        gnss_pvt_t pvt;
+        gnss_get_pvt(&pvt);
+        if (mode == MODE_3D && pvt.known) {
+            append(&length, ",\"climb\":%.3f", (double)pvt.climb_ms);
+        }
     }
     append(&length, "}\r\n");
     return length;

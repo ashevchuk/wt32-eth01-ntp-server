@@ -75,6 +75,7 @@
 #define PVT_OFFSET_FLAGS 21
 #define PVT_OFFSET_SATELLITES 23
 #define PVT_OFFSET_HORIZONTAL_ACCURACY 40
+#define PVT_OFFSET_VELOCITY_DOWN 56
 #define PVT_VALID_TIME 0x02
 #define PVT_VALID_RESOLVED 0x04
 #define PVT_FLAG_FIX_OK 0x01
@@ -402,6 +403,7 @@ static void handle_nav_pvt(const uint8_t *payload, size_t length)
         .satellites = payload[PVT_OFFSET_SATELLITES],
         .time_accuracy_ns = time_accuracy == ACCURACY_UNKNOWN ? -1 : (int64_t)time_accuracy,
         .horizontal_accuracy_m = horizontal_accuracy == ACCURACY_UNKNOWN ? -1.0f : horizontal_accuracy / 1000.0f,
+        .climb_ms = -(int32_t)read_u32(payload + PVT_OFFSET_VELOCITY_DOWN) / 1000.0f,
     };
     portENTER_CRITICAL(&status_lock);
     pvt_state = pvt;

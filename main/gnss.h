@@ -59,7 +59,7 @@ typedef struct {
 size_t gnss_get_satellites(gnss_satellite_t satellites[GNSS_MAX_SATELLITES], int64_t *age_us);
 
 // UBX-NAV-PVT: fix and time validity. time_accuracy_ns and horizontal_accuracy_m are negative while unknown.
-// time_trusted tells whether the receiver's time is accepted as the GNSS source; known is false when no
+// climb_ms is the vertical speed, positive upwards. time_trusted tells whether the receiver's time is accepted as the GNSS source; known is false when no
 // message arrived in the last seconds.
 typedef struct {
     bool known;
@@ -71,6 +71,7 @@ typedef struct {
     uint8_t satellites;
     int64_t time_accuracy_ns;
     float horizontal_accuracy_m;
+    float climb_ms;
 } gnss_pvt_t;
 
 void gnss_get_pvt(gnss_pvt_t *pvt);
