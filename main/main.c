@@ -14,6 +14,7 @@
 #include "i2c_bus.h"
 #include "lcd.h"
 #include "leap.h"
+#include "gpsd.h"
 #include "munin.h"
 #include "ntp_clock.h"
 #include "ntp_server.h"
@@ -102,6 +103,7 @@ void app_main(void)
     started("reset button", reset_button_start());
     started("upstream client", upstream_start());
     started("munin node", munin_start());
+    started("gpsd server", gpsd_start());
     started("web server", web_start());
     ESP_ERROR_CHECK_WITHOUT_ABORT(ota_confirm_running_image());
 }
